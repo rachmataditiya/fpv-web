@@ -294,6 +294,20 @@ export class BotManager {
     return this.killBot(i);
   }
 
+  /** Area damage (barrel blast): every living bot inside `radius` of `pos`
+   *  takes `damage`. Returns the death events — kills count for the player
+   *  (they lit the barrel). */
+  blast(pos: THREE.Vector3, radius: number, damage: number): BotDiedEvent[] {
+    const died: BotDiedEvent[] = [];
+    for (let i = 0; i < this.bots.length; i++) {
+      const b = this.bots[i];
+      if (!b.alive || b.pos.distanceTo(pos) > radius) continue;
+      const d = this.hit(i, damage);
+      if (d) died.push(d);
+    }
+    return died;
+  }
+
   /** Blast damage to every living bot within `radius` of `pos` (heavy rocket
    *  friendly fire — enemy-inflicted, so NO kills++). Returns the deaths. */
   areaDamage(pos: THREE.Vector3, radius: number, damage: number): BotDiedEvent[] {

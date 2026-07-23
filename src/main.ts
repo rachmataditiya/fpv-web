@@ -21,7 +21,7 @@ import { loadMap } from './world/bsp/mapStore';
 import { saveProfile } from './input/profiles';
 import { Weapon } from './game/weapon';
 import type { WeaponId } from './game/weapon';
-import { BarrelField, BARREL_BLAST_RADIUS } from './game/barrels';
+import { BarrelField, BARREL_BLAST_RADIUS, BARREL_BLAST_BOT_DAMAGE } from './game/barrels';
 import { PickupField } from './game/pickups';
 import { TargetRegistry } from './game/targetRegistry';
 import { PlayerHealth } from './game/playerHealth';
@@ -140,6 +140,7 @@ let bots: BotManager | null = null;
 let makeBots: (() => BotManager) | null = null;
 const fx = new FxSystem(scene);
 const sfx = new Sfx();
+sfx.setVolume(settings.volume);
 
 // heavy-rocket visuals — additive sprites synced to whichever bot manager is
 // on screen (live, or the killcam playback manager)
@@ -330,14 +331,22 @@ function killPlayer(killerIdx: number): void {
   quad.thrust = 0;
   flash('YOU DIED');
   recorder.logEvent('player-died', [quad.pos.x, quad.pos.y, quad.pos.z]);
-  if (killerIdx >= 0) startKillcam(killerIdx);
+  if (killerIdx >= 0 && settings.killcam) startKillcam(killerIdx);
 }
 
-/** A barrel went boom at pos (player shot or blast chain reaction): FX + the
- *  too-close crash check. */
+/** A barrel went boom at pos (player shot or blast chain reaction): FX, bot
+ *  area damage, and the too-close player crash check. */
 function onBarrelBoom(pos: THREE.Vector3): void {
   fx.explosion(pos);
   sfx.explode();
+  if (bots) {
+    for (const died of bots.blast(pos, BARREL_BLAST_RADIUS, BARREL_BLAST_BOT_DAMAGE)) {
+      recorder.logEvent('bot-died', [died.pos.x, died.pos.y, died.pos.z]);
+      fx.explosion(died.pos);
+      hud.pulseKill();
+      flash(`${died.kind === 'drone' ? 'DRONE' : 'SOLDIER'} CAUGHT IN THE BLAST — ${bots.kills}`, 900);
+    }
+  }
   if (quad.pos.distanceTo(pos) < BARREL_BLAST_RADIUS) {
     quad.crashed = true;
     quad.crashTimer = params.respawnDelay;
@@ -624,6 +633,8 @@ const settingsPanel = new SettingsPanel(ui, {
     },
     bots: (on) => flash(on ? 'BOTS ON — NEXT MAP LOAD' : 'BOTS OFF — NEXT MAP LOAD'),
     botDifficulty: (d) => flash(`BOT DIFFICULTY: ${d.toUpperCase()} — NEXT MAP LOAD`),
+    volume: (v) => sfx.setVolume(v),
+    killcam: (on) => flash(on ? 'KILLCAM ON' : 'KILLCAM OFF', 700),
   },
   save: () => saveSettings(settings),
   rates: {
@@ -781,8 +792,10 @@ const hooks = {
     mock?.tick(performance.now());
 
     if (killcam) {
-      input.sample(); // keep action edges flowing so FIRE/RESPAWN can skip
-      if (!killcam.player.step(dt)) endKillcam();
+      // sample() can END the killcam synchronously (FIRE/RESPAWN skip fires
+      // from inside it) — re-check before dereferencing, or this null-derefs.
+      input.sample();
+      if (killcam && !killcam.player.step(dt)) endKillcam();
       return; // live sim is frozen while the replay runs
     }
 

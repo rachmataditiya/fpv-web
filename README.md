@@ -63,6 +63,12 @@ Use **Export / Import JSON** to transfer or merge calibrations; imported profile
 
 Upload community-made **GoldSrc v30** `.bsp` maps (CS 1.6, Half-Life era) via the **Custom maps** button in the dock — Source-engine maps (CS:S/CS:GO) are not supported. Add the map's `.wad` texture archives in the same drop if it needs them; missing textures get readable fallbacks. Maps persist in IndexedDB and load as free-fly worlds with full collision (BVH mesh — walls crash you like the real thing), spawning at the map's `info_player_start`. Scale is authentic: 1 unit = 1 inch, so de_dust is ~120 m across. A tiny sample arena ships at `public/assets/demo_arena.bsp`.
 
+## War mode (BSP maps)
+
+BSP maps boot into **war mode**: explosive barrels plus an AI squad hunting your drone — a rifleman, a rooftop **sniper** (watch for the red laser telegraph), a **heavy** lobbing slow, dodgeable rockets, a **scout** drone that marks your position for the squad, and a rifleman escort drone. Bots patrol, hear your rotors up close (~18 m) and your gunfire further out, coordinate alerts, and hunt your last known position. You have 100 HP (INTEGRITY on the HUD); they have classes, health, and 10 s respawns.
+
+Your arsenal: **blaster** (hold to auto-fire), **burst** rifle, and a charge-to-fire **railgun** — switch with `1/2/3`, cycle with `Q` (gamepad RB / the DJI RC left-center switch), or fly through the floating pickups scattered on the map. Shooting a barrel next to a soldier kills it; standing still next to anything kills you. Death plays a killer-POV **killcam** (fire to skip), rebuilt from the deterministic replay recorder. Bots, difficulty (easy/normal/hard), killcam, and volume all live in **Settings**; racing is one Restart-button press away (tracks via the in-game editor or the map folder's `track.json`).
+
 ## Architecture
 
 ```

@@ -12,6 +12,10 @@ export interface SettingsDeps {
     /** War-mode rows — effect on next map load; the callback just flashes. */
     bots(on: boolean): void;
     botDifficulty(d: BotDifficulty): void;
+    /** Master SFX volume, 0–1 — applied live. */
+    volume(v: number): void;
+    /** Killer-POV replay on death — read at death time, no live apply needed. */
+    killcam(on: boolean): void;
   };
   save(): void;
   /** Live access to the ACTIVE input device's profile (rates/expo/throttle). */
@@ -111,6 +115,13 @@ export class SettingsPanel {
     this.overlayEl.querySelectorAll<HTMLButtonElement>('.difficulty-btn').forEach(btn => {
       btn.classList.toggle('active', btn.dataset.difficulty === s.botDifficulty);
     });
+    const killcamCheck = this.overlayEl.querySelector<HTMLInputElement>('.killcam-check');
+    if (killcamCheck) killcamCheck.checked = s.killcam;
+    // Audio
+    const volInput = this.overlayEl.querySelector<HTMLInputElement>('.volume-slider');
+    const volLabel = this.overlayEl.querySelector<HTMLSpanElement>('.volume-value');
+    if (volInput) volInput.value = String(Math.round(s.volume * 100));
+    if (volLabel) volLabel.textContent = `${Math.round(s.volume * 100)}%`;
 
     // Rates & throttle (active device profile)
     const active = this.deps.rates?.get() ?? null;
@@ -262,6 +273,34 @@ export class SettingsPanel {
       diffContainer.appendChild(btn);
     });
     panel.appendChild(diffContainer);
+
+    // Killcam checkbox (war mode)
+    const killcamGroup = document.createElement('div');
+    killcamGroup.className = 'checkbox-group';
+    const killcamInput = document.createElement('input');
+    killcamInput.type = 'checkbox';
+    killcamInput.className = 'killcam-check';
+    killcamInput.addEventListener('change', () => {
+      this.deps.settings.killcam = killcamInput.checked;
+      this.deps.apply.killcam(killcamInput.checked);
+      this.deps.save();
+    });
+    const killcamLabel = document.createElement('label');
+    killcamLabel.textContent = 'Killcam on death';
+    killcamLabel.prepend(killcamInput);
+    killcamGroup.appendChild(killcamLabel);
+    panel.appendChild(killcamGroup);
+
+    // Master volume slider (live)
+    const volGroup = this._makeSliderGroup('Volume', '0', '100', '1', '%',
+      (value) => {
+        this.deps.settings.volume = value / 100;
+        this.deps.apply.volume(value / 100);
+      }
+    );
+    volGroup.querySelector('.slider-input')!.classList.add('volume-slider');
+    volGroup.querySelector('.live-label')!.classList.add('volume-value');
+    panel.appendChild(volGroup);
 
     // ---- Rates & throttle (edits the active device's profile — same data the
     // controller panel edits, so both stay in sync) ----

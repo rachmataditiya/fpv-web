@@ -15,6 +15,10 @@ export interface Settings {
   bots: boolean;
   /** Bot combat difficulty (applied on next map load). */
   botDifficulty: BotDifficulty;
+  /** Master audio volume, 0–1 (procedural WebAudio SFX). */
+  volume: number;
+  /** Killer-POV replay on death (war mode). */
+  killcam: boolean;
   bestLapMsByTrack: Record<string, number>;
 }
 
@@ -28,6 +32,8 @@ export const DEFAULT_SETTINGS: Settings = {
   freeFly: false,
   bots: true,
   botDifficulty: 'normal',
+  volume: 0.5, // matches the Sfx master-gain default users have been hearing
+  killcam: true,
   bestLapMsByTrack: {},
 };
 

@@ -15,6 +15,9 @@ const RESPAWN_S = 10;
 const COUNT = 16;
 /** Blast radius that crashes a too-close drone. */
 export const BARREL_BLAST_RADIUS = 5;
+/** Bot damage inside the blast: kills 30hp soldiers and any drone outright;
+ *  the 50hp heavy limps away — it's the class built to shrug off explosions. */
+export const BARREL_BLAST_BOT_DAMAGE = 34;
 
 interface Barrel extends ShotTarget {
   mesh: THREE.Group;
