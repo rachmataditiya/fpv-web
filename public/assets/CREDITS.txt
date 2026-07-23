@@ -1,0 +1,1 @@
+CC0 assets from polyhaven.com (HDRIs: kloofendal_48d_partly_cloudy_puresky, industrial_sunset_puresky; textures: aerial_grass_rock, forest_floor)

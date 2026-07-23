@@ -1,0 +1,31 @@
+# FPV Web Simulator — static Vite bundle behind arkana-1's Coolify Traefik.
+# Pattern per runbook: join the external `coolify` network, Traefik labels only,
+# NEVER bind :80/:443. Router/middleware names are globally unique (`fpvsim`).
+services:
+  simulator:
+    image: nginx:alpine
+    container_name: fpv-simulator
+    restart: unless-stopped
+    volumes:
+      - ./dist:/usr/share/nginx/html:ro
+      - ./maps:/maps:ro
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    networks:
+      - coolify
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=coolify
+      - traefik.http.middlewares.fpvsim-redirect.redirectscheme.scheme=https
+      - traefik.http.routers.fpvsim-http.entrypoints=http
+      - traefik.http.routers.fpvsim-http.middlewares=fpvsim-redirect
+      - traefik.http.routers.fpvsim-http.rule=Host(`simulator.arkana.app`)
+      - traefik.http.routers.fpvsim.entrypoints=https
+      - traefik.http.routers.fpvsim.rule=Host(`simulator.arkana.app`)
+      - traefik.http.routers.fpvsim.service=fpvsim
+      - traefik.http.routers.fpvsim.tls=true
+      - traefik.http.routers.fpvsim.tls.certresolver=letsencrypt
+      - traefik.http.services.fpvsim.loadbalancer.server.port=80
+
+networks:
+  coolify:
+    external: true

@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>FPV Web — Drone Racing Simulator</title>
+    <style>
+      :root {
+        /* "Pit-wall telemetry" palette — lens black, porcelain ink, race amber.
+           Amber doubles as the next-gate color in the 3D world, so UI and world
+           share one highlight language. Green is reserved for live telemetry. */
+        --bg: #0b0e14;
+        --panel: rgba(13, 17, 26, 0.94);
+        --panel2: rgba(21, 27, 40, 0.92);
+        --line: #1e2635;
+        --line2: #2c3750;
+        --fg: #e9eef4;
+        --mut: #7e8aa0;
+        --accent: #ffb03b; /* race amber */
+        --amber: #ffb03b;
+        --green: #3ddc84; /* telemetry green */
+        --warn: #ff5d5d;
+        --mono: ui-monospace, 'SF Mono', 'Cascadia Code', Menlo, monospace;
+      }
+      @media (prefers-reduced-motion: reduce) {
+        *, *::before, *::after { animation: none !important; transition: none !important; }
+      }
+      * { box-sizing: border-box; }
+      html, body { margin: 0; height: 100%; overflow: hidden; background: #05070c; }
+      body { font: 14px system-ui, sans-serif; color: var(--fg); }
+      #app { position: fixed; inset: 0; }
+      #app canvas { display: block; }
+      #hud { position: fixed; inset: 0; pointer-events: none; z-index: 10; }
+      #ui { position: fixed; inset: 0; pointer-events: none; z-index: 20; }
+      #ui > * { pointer-events: auto; }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+    <div id="hud"></div>
+    <div id="ui"></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

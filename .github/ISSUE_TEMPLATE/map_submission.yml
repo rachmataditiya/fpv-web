@@ -1,0 +1,44 @@
+name: Map Submission
+description: Submit a community map for inclusion
+labels: [map]
+body:
+  - type: input
+    id: mapname
+    attributes:
+      label: Map name
+      description: A short, unique name for the map.
+      placeholder: de_dust2
+    validations:
+      required: true
+  - type: input
+    id: source
+    attributes:
+      label: BSP source
+      description: Where did you obtain the .bsp file? (e.g. Valve, original creation, a community pack)
+      placeholder: e.g. Valve's Counter-Strike 1.6 map pack
+    validations:
+      required: true
+  - type: checkboxes
+    id: license
+    attributes:
+      label: License Confirmation
+      description: We cannot accept copyrighted material without permission.
+      options:
+        - label: I confirm the map and WAD files are freely redistributable or my own original work
+          required: true
+  - type: input
+    id: track
+    attributes:
+      label: Track file
+      description: If you have a `track.json` for racing, describe or link it here. Leave blank if it's a freestyle‑only map.
+      placeholder: Attached or link to file
+    validations:
+      required: false
+  - type: textarea
+    id: screenshots
+    attributes:
+      label: Screenshots
+      description: Optional – add links to screenshots or videos of the map.
+      placeholder: https://i.imgur.com/...
+    validations:
+      required: false

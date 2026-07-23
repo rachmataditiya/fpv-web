@@ -1,0 +1,33 @@
+name: Deploy
+
+# Deploys the static bundle to the production host over rsync/SSH.
+# Requires repo secrets (Settings → Secrets and variables → Actions):
+#   DEPLOY_SSH_KEY   — private key authorized on the server
+#   DEPLOY_HOST      — e.g. user@203.0.113.10
+#   DEPLOY_PATH      — e.g. /home/user/simulator-stack/dist/
+# and repo variable DEPLOY_ENABLED=true to arm the workflow.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    if: vars.DEPLOY_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck && npm test && npx vite build
+      - name: Deploy over rsync
+        run: |
+          eval "$(ssh-agent -s)"
+          ssh-add - <<< "${{ secrets.DEPLOY_SSH_KEY }}"
+          rsync -az --delete -e "ssh -o StrictHostKeyChecking=accept-new" \
+            dist/ "${{ secrets.DEPLOY_HOST }}:${{ secrets.DEPLOY_PATH }}"

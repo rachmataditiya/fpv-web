@@ -1,0 +1,31 @@
+name: Feature Request
+description: Suggest an idea for the simulator
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve?
+      description: Explain the pain point or missing capability.
+      placeholder: e.g. I can't see my lap times after finishing a race.
+    validations:
+      required: true
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed solution
+      description: Describe how you'd like it to work.
+      placeholder: e.g. A lap history table that persists across sessions.
+    validations:
+      required: true
+  - type: dropdown
+    id: phase
+    attributes:
+      label: GDLC phase
+      description: Which development phase does this fit? (see docs/GDLC.md)
+      options:
+        - prototype
+        - production
+        - live-ops
+    validations:
+      required: false

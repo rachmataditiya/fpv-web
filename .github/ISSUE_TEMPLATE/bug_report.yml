@@ -1,0 +1,69 @@
+name: Bug Report
+description: Report a problem with the simulator
+labels: [bug]
+body:
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: A clear description of the unexpected behaviour.
+      placeholder: e.g. Drone clips through the ground when disarmed.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behaviour
+      description: What you expected to happen instead.
+      placeholder: e.g. The drone should stay on the ground.
+    validations:
+      required: true
+  - type: dropdown
+    id: map
+    attributes:
+      label: Map
+      description: Which map were you flying on?
+      options:
+        - canyon
+        - valley
+        - other/custom
+    validations:
+      required: true
+  - type: dropdown
+    id: input
+    attributes:
+      label: Input device
+      description: How were you controlling the drone?
+      options:
+        - keyboard
+        - gamepad
+        - DJI RC 3 WebHID
+        - mock (?mockhid=1)
+    validations:
+      required: true
+  - type: input
+    id: browser
+    attributes:
+      label: Browser
+      description: Browser name and version (e.g. Chrome 120, Edge 119).
+      placeholder: Chrome 120
+    validations:
+      required: true
+  - type: textarea
+    id: console
+    attributes:
+      label: Console errors
+      description: Paste any errors from the browser console (F12). If none, write "none".
+      placeholder: Uncaught TypeError...
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Give us a precise list of actions that trigger the bug.
+      placeholder: |
+        1. Go to https://simulator.arkana.app
+        2. Select canyon map
+        3. Arm the drone
+        4. ...
+    validations:
+      required: true
