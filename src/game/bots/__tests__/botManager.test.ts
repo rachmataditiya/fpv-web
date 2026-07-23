@@ -6,6 +6,7 @@ import { Weapon, WEAPON_COOLDOWN } from '../../weapon';
 import { TargetRegistry } from '../../targetRegistry';
 import { BotManager, PLAYER_SHOT_DAMAGE } from '../botManager';
 import { TUNING } from '../types';
+import type { Bot } from '../types';
 import type { CollisionWorld } from '../../../physics/quad';
 
 const DT = 1 / 240;
@@ -32,22 +33,25 @@ function shoot(weapon: Weapon, reg: TargetRegistry, at: THREE.Vector3): void {
 }
 
 describe('BotManager (Phase A dummies)', () => {
-  it('spawns 2 drones + 3 soldiers on the floor, deterministically', () => {
+  it('spawns the default 5-bot squad (3 soldiers + 2 drones) on the floor, deterministically', () => {
     const a = makeBots();
     const b = makeBots();
     expect(a.aliveCount()).toBe(5);
     expect(a.targets.length).toBe(5);
+    const kinds = a.targets.map((t) => (t as Bot).kind);
+    expect(kinds.filter((k) => k === 'soldier').length).toBe(3);
+    expect(kinds.filter((k) => k === 'drone').length).toBe(2);
     for (let i = 0; i < 5; i++) {
       expect(a.targets[i].pos.toArray()).toEqual(b.targets[i].pos.toArray()); // same seed → same spots
     }
   });
 
-  it('takes PLAYER_SHOT_DAMAGE per hit and dies at 0 hp (drone = 2 taps)', () => {
+  it('takes PLAYER_SHOT_DAMAGE per hit and dies at 0 hp (rifleman drone = 2 taps)', () => {
     const bots = makeBots();
     const reg = new TargetRegistry();
     reg.register({ get targets() { return bots.targets; }, onHit: (i) => void bots.hit(i, PLAYER_SHOT_DAMAGE) });
     const weapon = new Weapon();
-    const droneIdx = 0; // construction order: drones first
+    const droneIdx = 4; // DEFAULT_SQUAD order: soldiers first, rifleman drone last
     const at = bots.targets[droneIdx].pos.clone();
 
     const tapsToKill = Math.ceil(TUNING.drone.hp / PLAYER_SHOT_DAMAGE);
@@ -62,17 +66,18 @@ describe('BotManager (Phase A dummies)', () => {
 
   it('respawns 10s later at a fresh spot with full hp', () => {
     const bots = makeBots();
-    const before = bots.targets[0].pos.clone();
-    bots.hit(0, TUNING.drone.hp); // one-shot for the test
-    expect(bots.targets[0].alive).toBe(false);
+    const droneIdx = 4; // the squad's rifleman drone (TUNING.drone base)
+    const before = bots.targets[droneIdx].pos.clone();
+    bots.hit(droneIdx, TUNING.drone.hp); // one-shot for the test
+    expect(bots.targets[droneIdx].alive).toBe(false);
 
     const ctx = { playerPos: AVOID, playerVel: new THREE.Vector3(), playerAlive: true, playerNoise: false };
     const ticks = Math.ceil((TUNING.drone.respawnS + 0.1) / DT);
     for (let i = 0; i < ticks; i++) bots.tick(DT, ctx);
 
-    expect(bots.targets[0].alive).toBe(true);
-    expect(bots.targets[0].pos.equals(before)).toBe(false); // new sampled spot
-    expect(bots.hit(0, PLAYER_SHOT_DAMAGE)).toBeNull();     // full hp again — one tap doesn't kill
+    expect(bots.targets[droneIdx].alive).toBe(true);
+    expect(bots.targets[droneIdx].pos.equals(before)).toBe(false); // new sampled spot
+    expect(bots.hit(droneIdx, PLAYER_SHOT_DAMAGE)).toBeNull();     // full hp again — one tap doesn't kill
   });
 
   it('dead bots are ignored by hit() (no double-kill)', () => {

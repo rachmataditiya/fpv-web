@@ -20,10 +20,15 @@ import { parseWad } from './world/bsp/wadParser';
 import { loadMap } from './world/bsp/mapStore';
 import { saveProfile } from './input/profiles';
 import { Weapon } from './game/weapon';
+import type { WeaponId } from './game/weapon';
 import { BarrelField, BARREL_BLAST_RADIUS } from './game/barrels';
+import { PickupField } from './game/pickups';
 import { TargetRegistry } from './game/targetRegistry';
 import { PlayerHealth } from './game/playerHealth';
-import { BotManager, PLAYER_SHOT_DAMAGE } from './game/bots/botManager';
+import { BotManager } from './game/bots/botManager';
+import { DEFAULT_SQUAD } from './game/bots/types';
+import { ReplayRecorder, ReplayPlayer } from './game/replay';
+import type { QuadSnapshot } from './game/replay';
 import { FxSystem } from './render/fx';
 import { Sfx } from './audio/sfx';
 import { buildTrack, deleteTrackFor, exportTrackJson, fetchServerTrack, savedTrackFor, saveTrackFor } from './world/bsp/bspTracks';
@@ -126,9 +131,55 @@ const weapon = new Weapon();
 const targetRegistry = new TargetRegistry();
 const playerHealth = new PlayerHealth(100);
 let barrels: BarrelField | null = null;
+let pickups: PickupField | null = null;
+let pickupMeshes: THREE.Group[] = [];
+let pickupPhase = 0; // render-only bob/spin accumulator (frameDt-driven)
 let bots: BotManager | null = null;
+/** Builds bots identical to the live set — stored by the BSP-load closure so
+ *  killcam playback bots match exactly (world/bounds/spawns/squad/seed/diff). */
+let makeBots: (() => BotManager) | null = null;
 const fx = new FxSystem(scene);
 const sfx = new Sfx();
+
+// heavy-rocket visuals — additive sprites synced to whichever bot manager is
+// on screen (live, or the killcam playback manager)
+const rocketSprites: THREE.Sprite[] = [];
+for (let i = 0; i < 8; i++) {
+  const s = new THREE.Sprite(
+    new THREE.SpriteMaterial({
+      color: 0xff5522,
+      blending: THREE.AdditiveBlending,
+      transparent: true,
+      opacity: 0.9,
+      depthWrite: false,
+    }),
+  );
+  s.scale.setScalar(0.35);
+  s.visible = false;
+  scene.add(s);
+  rocketSprites.push(s);
+}
+
+// replay recording (Wave 2): inputs + full-state snapshots every sim tick —
+// the sim is deterministic from (snapshot + input stream), so this is all the
+// killcam needs. Zero behavioral impact on the live path.
+const recorder = new ReplayRecorder();
+const snapQuad = (): QuadSnapshot => ({
+  pos: quad.pos.toArray(),
+  vel: quad.vel.toArray(),
+  quat: quad.q.toArray(),
+  angVel: quad.omega.toArray(),
+  thrust: quad.thrust,
+  armed: quad.armed,
+  crashed: quad.crashed,
+  crashTimer: quad.crashTimer,
+});
+recorder.captureFn = () => ({
+  quad: snapQuad(),
+  hp: playerHealth.hp,
+  weapon: weapon.serialize(),
+  bots: bots ? bots.serialize() : null,
+});
 
 // track editor (BSP maps)
 let editingTrack = false;
@@ -148,6 +199,34 @@ let messageUntil = 0;
 function flash(msg: string, ms = 1500): void {
   message = msg;
   messageUntil = performance.now() + ms;
+}
+
+// ---------- player arsenal (Wave 4): blaster / burst / railgun ----------
+const WEAPON_CYCLE: readonly WeaponId[] = ['blaster', 'burst', 'railgun'];
+let currentWeapon: WeaponId = 'blaster';
+function switchWeapon(id: WeaponId): void {
+  if (id === currentWeapon) return;
+  currentWeapon = id;
+  weapon.setConfig(id);
+  flash(weapon.config.name, 700);
+}
+
+/** Procedural pickup icon: octahedron core + wireframe shell ring, tinted
+ *  per weapon (blaster green / burst amber / railgun cyan). */
+const PICKUP_COLORS: Record<WeaponId, number> = { blaster: 0x3ddc84, burst: 0xffb020, railgun: 0x49c8ff };
+function createPickupMesh(id: WeaponId): THREE.Group {
+  const color = PICKUP_COLORS[id];
+  const core = new THREE.Mesh(
+    new THREE.OctahedronGeometry(0.25),
+    new THREE.MeshBasicMaterial({ color }),
+  );
+  const ring = new THREE.Mesh(
+    new THREE.TorusGeometry(0.42, 0.02, 8, 32),
+    new THREE.MeshBasicMaterial({ color, wireframe: true }),
+  );
+  const g = new THREE.Group();
+  g.add(core, ring);
+  return g;
 }
 
 const onRaceEvent = (e: RaceEvent): void => {
@@ -198,6 +277,74 @@ function startBspRace(t: TrackDef): void {
 function respawn(): void {
   resetQuad(quad, checkpoint().pos, checkpoint().yawDeg, 0.5);
   playerHealth.reset();
+}
+
+// ---------- killcam (Wave 2): replay the last ~5s from the killer's POV ----------
+let killcam: { player: ReplayPlayer; killerIdx: number } | null = null;
+
+function startKillcam(killerIdx: number): void {
+  if (!bots || !collisionWorld || !makeBots || killerIdx < 0) return;
+  const player = new ReplayPlayer({
+    world: collisionWorld,
+    params,
+    checkpoint: checkpoint(),
+    oobY: bspName ? -80 : null,
+    uptiltDeg: settings.uptiltDeg,
+    makeBots,
+    fx,
+  });
+  // ~5s back; load clamps to the oldest snapshot when the buffer is younger
+  if (!player.load(recorder.data(), recorder.tickIndex - 1200)) return;
+  if (!player.bots) return; // snapshot predates the bot spawn — nothing to watch
+  scene.add(player.bots.group);
+  bots.group.visible = false;
+  // the shared camera is driven directly this frame on: re-parent it to the
+  // scene root (FPV mode parents it to the drone group, so a plain
+  // position/lookAt would be in drone-local space)
+  scene.add(rig.camera);
+  rig.camera.rotation.set(0, 0, 0);
+  droneVisual.visible = true; // your own drone is the star of the replay
+  killcam = { player, killerIdx };
+}
+
+function endKillcam(): void {
+  if (!killcam) return;
+  if (killcam.player.bots) scene.remove(killcam.player.bots.group);
+  if (bots) bots.group.visible = true;
+  killcam = null;
+  // restore the rig's camera parenting/transforms (setMode no-ops on the same
+  // mode, so hop away and back to force applyMode)
+  const mode = rig.getMode();
+  rig.setMode(mode === 'fpv' ? 'chase' : 'fpv');
+  rig.setMode(mode);
+  respawn();
+  flash('YOU DIED', 900);
+}
+
+/** Lethal damage to the player (bot shot or heavy-rocket blast): crash +
+ *  death cam. killerIdx < 0 (blasts) skips the killer-POV killcam. */
+function killPlayer(killerIdx: number): void {
+  quad.crashed = true;
+  quad.crashTimer = params.respawnDelay;
+  quad.vel.set(0, 0, 0);
+  quad.thrust = 0;
+  flash('YOU DIED');
+  recorder.logEvent('player-died', [quad.pos.x, quad.pos.y, quad.pos.z]);
+  if (killerIdx >= 0) startKillcam(killerIdx);
+}
+
+/** A barrel went boom at pos (player shot or blast chain reaction): FX + the
+ *  too-close crash check. */
+function onBarrelBoom(pos: THREE.Vector3): void {
+  fx.explosion(pos);
+  sfx.explode();
+  if (quad.pos.distanceTo(pos) < BARREL_BLAST_RADIUS) {
+    quad.crashed = true;
+    quad.crashTimer = params.respawnDelay;
+    quad.vel.set(0, 0, 0);
+    quad.thrust = 0;
+    flash('CAUGHT IN THE BLAST!');
+  }
 }
 
 function restartRace(): void {
@@ -257,42 +404,57 @@ if (bspName) {
         get targets() { return bf.targets; },
         onHit: (i) => {
           const boomAt = bf.explode(i);
-          fx.explosion(boomAt);
-          sfx.explode();
           flash(`BARREL ${bf.score}`, 700);
-          if (quad.pos.distanceTo(boomAt) < BARREL_BLAST_RADIUS) {
-            quad.crashed = true;
-            quad.crashTimer = params.respawnDelay;
-            quad.vel.set(0, 0, 0);
-            quad.thrust = 0;
-            flash('CAUGHT IN THE BLAST!');
-          }
+          onBarrelBoom(boomAt);
         },
       });
 
-      // enemy bots (war mode): 2 drones + 3 soldiers, spawned on real floors
-      const bm = new BotManager(
-        world.collision,
-        { minX, maxX, minZ, maxZ },
-        spawnCheckpoint.pos,
-        world.geometryFloorAt,
-        bsp.spawns.slice(1), // the map's unused player spawns make natural bot posts
-      );
-      bots = bm;
-      scene.add(bm.group);
-      targetRegistry.register({
-        get targets() { return bm.targets; },
-        onHit: (i) => {
-          const died = bm.hit(i, PLAYER_SHOT_DAMAGE);
-          if (died) {
-            fx.explosion(died.pos);
-            sfx.explode();
-            flash(`${died.kind === 'drone' ? 'DRONE' : 'SOLDIER'} DOWN — ${bm.kills}`, 900);
-          } else {
-            fx.impact(bm.targets[i].pos);
-          }
-        },
+      // weapon pickups scattered on real floors (burst/railgun/blaster mix)
+      const pf = new PickupField(world.collision, { minX, maxX, minZ, maxZ }, spawnCheckpoint.pos, 7331, world.geometryFloorAt);
+      pickups = pf;
+      pickupMeshes = pf.pickups.map((p) => {
+        const m = createPickupMesh(p.weapon);
+        m.position.copy(p.pos);
+        m.visible = p.alive;
+        scene.add(m);
+        return m;
       });
+
+      // enemy bots (war mode): the 5-bot squad (rifle/sniper/heavy soldiers +
+      // scout/rifle drones), spawned on real floors
+      if (settings.bots) {
+        // factory preserved for killcam playback bots (identical construction)
+        const botDifficulty = settings.botDifficulty;
+        makeBots = () =>
+          new BotManager(
+            world.collision,
+            { minX, maxX, minZ, maxZ },
+            spawnCheckpoint.pos,
+            world.geometryFloorAt,
+            bsp.spawns.slice(1), // the map's unused player spawns make natural bot posts
+            DEFAULT_SQUAD,
+            4242,
+            { difficulty: botDifficulty, fx },
+          );
+        const bm = makeBots();
+        bots = bm;
+        scene.add(bm.group);
+        targetRegistry.register({
+          get targets() { return bm.targets; },
+          onHit: (i, damage) => {
+            const died = bm.hit(i, damage);
+            if (died) {
+              recorder.logEvent('bot-died', [died.pos.x, died.pos.y, died.pos.z]);
+              fx.explosion(died.pos);
+              sfx.explode();
+              hud.pulseKill();
+              flash(`${died.kind === 'drone' ? 'DRONE' : 'SOLDIER'} DOWN — ${bm.kills}`, 900);
+            } else {
+              fx.impact(bm.targets[i].pos);
+            }
+          },
+        });
+      }
 
       // race track: player-edited first, then the map folder's published
       // track.json. NOT auto-started — BSP maps default to WAR mode (free fly
@@ -314,11 +476,18 @@ if (bspName) {
 }
 
 input.onAction = (a) => {
+  // Killcam: FIRE/RESPAWN skips back to live; every other action except pause
+  // is swallowed so the frozen live sim isn't touched mid-replay.
+  if (killcam) {
+    if (a === 'shoot' || a === 'respawn') endKillcam();
+    if (a !== 'pause') return;
+  }
   // While paused only 'pause' (resume) is allowed — edges are still sampled from
   // renderTick so the sim stays controllable, but arming/respawning is blocked.
   if (loop.paused && a !== 'pause') return;
   switch (a) {
     case 'arm':
+      recorder.recordAction('arm');
       if (!quad.armed) {
         // safety: require low throttle to arm (like a real FC). Uses the throttle
         // from the current sample — onAction fires from inside sample(), so
@@ -335,6 +504,7 @@ input.onAction = (a) => {
       }
       break;
     case 'respawn':
+      recorder.recordAction('respawn');
       respawn();
       break;
     case 'camera':
@@ -345,10 +515,23 @@ input.onAction = (a) => {
       togglePause();
       break;
     case 'shoot':
+      recorder.recordAction('shoot');
       if (quad.armed && !quad.crashed) weapon.requestFire();
       break;
     case 'restart':
       restartRace();
+      break;
+    case 'weapon1':
+      switchWeapon('blaster');
+      break;
+    case 'weapon2':
+      switchWeapon('burst');
+      break;
+    case 'weapon3':
+      switchWeapon('railgun');
+      break;
+    case 'weaponNext':
+      switchWeapon(WEAPON_CYCLE[(WEAPON_CYCLE.indexOf(currentWeapon) + 1) % WEAPON_CYCLE.length]);
       break;
   }
 };
@@ -439,6 +622,8 @@ const settingsPanel = new SettingsPanel(ui, {
     freeFly: (on) => {
       if (!on) restartRace(); // leaving free-fly = fresh race
     },
+    bots: (on) => flash(on ? 'BOTS ON — NEXT MAP LOAD' : 'BOTS OFF — NEXT MAP LOAD'),
+    botDifficulty: (d) => flash(`BOT DIFFICULTY: ${d.toUpperCase()} — NEXT MAP LOAD`),
   },
   save: () => saveSettings(settings),
   rates: {
@@ -577,20 +762,33 @@ const hudData: HudData = {
   score: null,
   hp: null,
   kills: null,
+  weaponName: null,
+  weaponMeter: null,
+  weaponMeterLabel: null,
 };
 
 const _e = new THREE.Euler();
+const _hitEuler = new THREE.Euler();
 const _aimQ = new THREE.Quaternion();
 const _uptiltQ = new THREE.Quaternion();
 const _aimX = new THREE.Vector3(1, 0, 0);
+const _kcEye = new THREE.Vector3(); // killcam killer-eye anchor
+let whirrAcc = 0; // sim seconds since the last enemy-drone whirr ping
 
 const hooks = {
   simTick(dt: number) {
     keyboard.tick(dt);
     mock?.tick(performance.now());
 
+    if (killcam) {
+      input.sample(); // keep action edges flowing so FIRE/RESPAWN can skip
+      if (!killcam.player.step(dt)) endKillcam();
+      return; // live sim is frozen while the replay runs
+    }
+
     const cmd = input.sample();
     lastThrottle = cmd.throttle;
+    recorder.recordTick(cmd, input.held('shoot'));
 
     prevPos.copy(quad.pos);
     prevQ.copy(quad.q);
@@ -603,20 +801,38 @@ const hooks = {
 
     if (race && !settings.freeFly && !editingTrack) race.update(dt, prevPos, quad.pos);
 
-    // weapon + barrels — hold to auto-fire; aim follows the FPV CAMERA (body
-    // forward rotated up by the camera uptilt) so shots land on the crosshair.
-    if (quad.armed && !quad.crashed && input.held('shoot')) weapon.requestFire();
+    // weapon + barrels — trigger level drives auto-fire (instant configs) or
+    // the railgun charge; aim follows the FPV CAMERA (body forward rotated up
+    // by the camera uptilt) so shots land on the crosshair.
+    weapon.setTriggerHeld(quad.armed && !quad.crashed && input.held('shoot'));
+    const chargeWas = weapon.charge01();
     _uptiltQ.setFromAxisAngle(_aimX, (settings.uptiltDeg * Math.PI) / 180);
     _aimQ.copy(quad.q).multiply(_uptiltQ);
     const shot = weapon.tick(dt, quad.pos, _aimQ, collisionWorld, targetRegistry.collect());
+    if (chargeWas === 0 && weapon.charge01() > 0) sfx.chargeUp(); // charge-start edge
     if (shot) {
-      fx.tracer(shot.from, shot.to);
-      fx.muzzle(shot.from);
+      recorder.logEvent('shot', [shot.from.x, shot.from.y, shot.from.z, shot.to.x, shot.to.y, shot.to.z]);
+      if (currentWeapon === 'railgun') {
+        fx.tracerThick(shot.from, shot.to); // includes the bigger muzzle
+        sfx.railgun();
+      } else {
+        fx.tracer(shot.from, shot.to);
+        fx.muzzle(shot.from);
+        if (currentWeapon === 'burst') sfx.burst();
+        else sfx.shoot();
+      }
       if (shot.hitWorld) fx.impact(shot.to);
-      sfx.shoot();
-      if (shot.targetIndex !== null) targetRegistry.dispatchHit(shot.targetIndex);
+      if (shot.targetIndex !== null) targetRegistry.dispatchHit(shot.targetIndex, shot.damage);
+      bots?.suppressNear(shot.from, shot.to); // near misses rattle soldiers' aim
     }
     barrels?.tick(dt);
+    if (pickups) {
+      for (const ev of pickups.tick(dt, quad.pos, !quad.crashed)) {
+        switchWeapon(ev.weapon);
+        sfx.pickup();
+        flash(`${weapon.config.name} ACQUIRED`, 900);
+      }
+    }
     if (bots) {
       bots.passive = editingTrack;
       // player's shot resolved above — a bot killed this tick cannot return fire
@@ -627,20 +843,47 @@ const hooks = {
         playerNoise: !!shot,
       });
       for (const ev of botEvents) {
-        if (ev.type !== 'bot-shot') continue;
+        if (ev.type === 'projectile-blast') {
+          // heavy rocket went off: FX, player splash, barrel chain reactions
+          fx.explosion(ev.pos);
+          sfx.explode();
+          if (!quad.crashed && quad.pos.distanceTo(ev.pos) < 4) {
+            if (playerHealth.damage(ev.damage)) killPlayer(-1);
+          }
+          for (const boomPos of barrels?.blastNear(ev.pos, 4) ?? []) onBarrelBoom(boomPos);
+          continue;
+        }
+        if (ev.type === 'bot-died') {
+          // blast friendly fire — no kill credit, but the body still drops
+          recorder.logEvent('bot-died', [ev.pos.x, ev.pos.y, ev.pos.z]);
+          fx.explosion(ev.pos);
+          sfx.explode();
+          flash(`${ev.kind === 'drone' ? 'DRONE' : 'SOLDIER'} DOWN`, 900);
+          continue;
+        }
+        if (ev.type !== 'bot-shot') continue; // bot-mark: squad-internal
+        recorder.logEvent('bot-shot', [ev.from.x, ev.from.y, ev.from.z, ev.to.x, ev.to.y, ev.to.z, ev.hitPlayer ? 1 : 0]);
         fx.tracer(ev.from, ev.to);
         fx.muzzle(ev.from);
-        sfx.shoot();
+        sfx.botShoot();
         if (ev.hitPlayer && !quad.crashed) {
-          hud.pulseDamage();
-          if (playerHealth.damage(ev.damage)) {
-            quad.crashed = true;
-            quad.crashTimer = params.respawnDelay;
-            quad.vel.set(0, 0, 0);
-            quad.thrust = 0;
-            flash('YOU DIED');
-          }
+          // bearing of the shooter relative to the camera yaw → edge chevron
+          _hitEuler.setFromQuaternion(quad.q, 'YXZ');
+          const sy = Math.atan2(-(ev.from.x - quad.pos.x), -(ev.from.z - quad.pos.z));
+          hud.pulseDamage(Math.atan2(Math.sin(sy - _hitEuler.y), Math.cos(sy - _hitEuler.y)));
+          if (playerHealth.damage(ev.damage)) killPlayer(bots.targets.indexOf(ev.shooter));
         }
+      }
+      // enemy rotor whirr — a ping every ~2s of sim time while a drone is near
+      const wd = bots.nearestAliveDroneDist(quad.pos);
+      if (wd < 30 && !quad.crashed) {
+        whirrAcc += dt;
+        if (whirrAcc >= 2) {
+          whirrAcc = 0;
+          sfx.droneWhirr(wd / 30);
+        }
+      } else {
+        whirrAcc = 0;
       }
     }
   },
@@ -652,15 +895,58 @@ const hooks = {
       keyboard.tick(frameDt);
       input.sample();
     }
-    // interpolate between the last two physics states for smooth rendering
-    renderPos.lerpVectors(prevPos, quad.pos, alpha);
-    renderQ.slerpQuaternions(prevQ, quad.q, alpha);
-    droneVisual.position.copy(renderPos);
-    droneVisual.quaternion.copy(renderQ);
+    if (killcam) {
+      // replay interpolation (playback prev→cur) and the killer's eye as the
+      // camera — rig.update is skipped so it can't fight the direct drive
+      const kp = killcam.player;
+      renderPos.lerpVectors(kp.prevPos, kp.quad.pos, alpha);
+      renderQ.slerpQuaternions(kp.prevQ, kp.quad.q, alpha);
+      droneVisual.position.copy(renderPos);
+      droneVisual.quaternion.copy(renderQ);
+      fx.update(frameDt);
+      kp.bots?.updateVisuals(frameDt, renderPos); // playback bots, not live
+      if (kp.botEye(killcam.killerIdx, _kcEye)) rig.camera.position.copy(_kcEye);
+      rig.camera.lookAt(renderPos);
+    } else {
+      // interpolate between the last two physics states for smooth rendering
+      renderPos.lerpVectors(prevPos, quad.pos, alpha);
+      renderQ.slerpQuaternions(prevQ, quad.q, alpha);
+      droneVisual.position.copy(renderPos);
+      droneVisual.quaternion.copy(renderQ);
 
-    rig.update(frameDt);
-    fx.update(frameDt);
-    bots?.updateVisuals(frameDt, renderPos);
+      rig.update(frameDt);
+      fx.update(frameDt);
+      bots?.updateVisuals(frameDt, renderPos);
+    }
+
+    // pickup icons: float bob + spin (render-only phase, frameDt-accumulated),
+    // positions/visibility synced from sim state
+    if (pickups) {
+      pickupPhase += frameDt;
+      for (let i = 0; i < pickupMeshes.length; i++) {
+        const p = pickups.pickups[i];
+        const m = pickupMeshes[i];
+        m.visible = p.alive;
+        if (p.alive) {
+          m.position.set(p.pos.x, p.pos.y + Math.sin(pickupPhase * 2 + i * 1.7) * 0.15, p.pos.z);
+          m.rotation.y = pickupPhase * 1.5 + i;
+        }
+      }
+    }
+
+    // heavy-rocket sprites follow whichever bot manager is on screen (during
+    // killcam the live bots are hidden — the playback manager owns the pool)
+    const shownBots = killcam ? killcam.player.bots : bots;
+    const projs = shownBots?.projectiles.list;
+    for (let i = 0; i < rocketSprites.length; i++) {
+      const p = projs?.[i];
+      if (p?.alive) {
+        rocketSprites[i].position.copy(p.pos);
+        rocketSprites[i].visible = true;
+      } else {
+        rocketSprites[i].visible = false;
+      }
+    }
 
     // HUD (attitude from render quaternion; YXZ = yaw→pitch→roll order)
     _e.setFromQuaternion(renderQ, 'YXZ');
@@ -681,11 +967,21 @@ const hooks = {
     hudData.score = barrels ? barrels.score : null;
     hudData.hp = bots ? playerHealth.hp : null;
     hudData.kills = bots ? bots.kills : null;
+    // weapon chip: heat on instant configs; charge while charging, else
+    // cooldown recovery on the railgun
+    hudData.weaponName = weapon.config.name;
+    if (weapon.config.chargeS > 0) {
+      hudData.weaponMeter = weapon.charge01() > 0 ? weapon.charge01() : 1 - weapon.cooldown01();
+      hudData.weaponMeterLabel = 'CHG';
+    } else {
+      hudData.weaponMeter = weapon.heat01();
+      hudData.weaponMeterLabel = 'HEAT';
+    }
     hudData.camera = rig.getMode();
     const cd = race && !settings.freeFly ? race.countdownLeft() : null;
     hudData.countdown = cd !== null ? Math.ceil(cd) : null;
     if (message && performance.now() > messageUntil) message = null;
-    hudData.message = loop.paused ? 'PAUSED — ESC TO RESUME' : message;
+    hudData.message = killcam ? 'WATCH KILLCAM — FIRE TO SKIP' : loop.paused ? 'PAUSED — ESC TO RESUME' : message;
     hud.update(hudData);
 
     renderer.render(scene, rig.camera);
@@ -705,8 +1001,11 @@ addEventListener('resize', () => {
 Object.assign(window as unknown as Record<string, unknown>, {
   __fpv: {
     quad, settings, params, input, weapon, fx, playerHealth, dt: PHYS_DT,
+    recorder,
+    get killcam() { return killcam; },
     get race() { return race; },
     get barrels() { return barrels; },
+    get pickups() { return pickups; },
     get bots() { return bots; },
     get collisionWorld() { return collisionWorld; },
     /** Drive N physics ticks + one render manually (rAF-independent test hook). */

@@ -29,6 +29,8 @@ interface MuzzleSlot {
   sprite: THREE.Sprite;
   active: boolean;
   life: number;
+  /** Scale multiplier (railgun muzzle is bigger than a blaster's). */
+  boost: number;
 }
 
 interface ExplosionSlot {
@@ -47,6 +49,12 @@ interface FireballSlot {
   active: boolean;
   life: number;
 }
+
+const _dir = new THREE.Vector3();
+const _up = new THREE.Vector3();
+const _perp = new THREE.Vector3();
+const _from = new THREE.Vector3();
+const _to = new THREE.Vector3();
 
 export class FxSystem {
   private scene: THREE.Scene;
@@ -199,7 +207,7 @@ export class FxSystem {
       sprite.visible = false;
       sprite.scale.set(0, 0, 0);
       this.scene.add(sprite);
-      this.muzzleSlots.push({ sprite, active: false, life: 0 });
+      this.muzzleSlots.push({ sprite, active: false, life: 0, boost: 1 });
     }
   }
 
@@ -301,19 +309,50 @@ export class FxSystem {
     posAttr.needsUpdate = true;
   }
 
-  muzzle(pos: THREE.Vector3) {
+  muzzle(pos: THREE.Vector3, boost = 1) {
     const slot = this.muzzleSlots[this.muzzleIdx];
     this.muzzleIdx = (this.muzzleIdx + 1) % this.muzzleSize;
     slot.active = true;
     slot.life = 0.05;
+    slot.boost = boost;
     slot.sprite.visible = true;
     slot.sprite.position.copy(pos);
-    slot.sprite.scale.set(0.5, 0.5, 0.5);
+    slot.sprite.scale.set(0.5 * boost, 0.5 * boost, 0.5 * boost);
     (slot.sprite.material as THREE.SpriteMaterial).opacity = 1;
 
     // muzzle sparks (fast, tiny, hot) + a wisp of smoke drifting up
     this.sparkIdx = this.burst(this.sparkSlots, this.sparkIdx, pos, 2, 7, 1.0, -9.8, 1);
     this.puffIdx = this.burst(this.puffSlots, this.puffIdx, pos, 0.2, 0.9, 0.4, 0.9, 0.4);
+  }
+
+  /** Railgun beam — the tracer pool drawn thick: center line plus two
+   *  parallels offset ±0.05 m on a stable perpendicular, bigger muzzle. */
+  tracerThick(from: THREE.Vector3, to: THREE.Vector3) {
+    _dir.subVectors(to, from);
+    if (_dir.lengthSq() < 1e-12) {
+      this.tracer(from, to);
+      return;
+    }
+    _dir.normalize();
+    // any vector not parallel to the beam seeds a stable perpendicular
+    _up.set(0, 1, 0);
+    if (Math.abs(_dir.y) > 0.9) _up.set(1, 0, 0);
+    _perp.crossVectors(_dir, _up).normalize().multiplyScalar(0.05);
+
+    this.tracer(from, to);
+    _from.copy(from).add(_perp);
+    _to.copy(to).add(_perp);
+    this.tracer(_from, _to);
+    _from.copy(from).sub(_perp);
+    _to.copy(to).sub(_perp);
+    this.tracer(_from, _to);
+    this.muzzle(from, 1.6);
+  }
+
+  /** Standalone smoke puff (drone death tumble etc.) — same pool the
+   *  explosion plumes draw from. */
+  smoke(pos: THREE.Vector3) {
+    this.smokeIdx = this.burst(this.smokeSlots, this.smokeIdx, pos, 0.4, 1.8, 0.6, 1.4, 0.55);
   }
 
   explosion(pos: THREE.Vector3) {
@@ -379,7 +418,7 @@ export class FxSystem {
         slot.active = false;
         slot.sprite.visible = false;
       } else {
-        const scale = 0.15 + 0.35 * (slot.life / 0.05);
+        const scale = (0.15 + 0.35 * (slot.life / 0.05)) * slot.boost;
         slot.sprite.scale.set(scale, scale, scale);
         (slot.sprite.material as THREE.SpriteMaterial).opacity = slot.life / 0.05;
       }

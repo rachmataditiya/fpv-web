@@ -119,6 +119,18 @@ export class BarrelField {
     return b.pos;
   }
 
+  /** Chain reaction: explode every unexploded barrel within `radius` of `pos`
+   *  (heavy rocket blasts). Returns the boom positions, live-first order. */
+  blastNear(pos: THREE.Vector3, radius: number): THREE.Vector3[] {
+    const booms: THREE.Vector3[] = [];
+    for (let i = 0; i < this.barrels.length; i++) {
+      const b = this.barrels[i];
+      if (!b.alive || b.pos.distanceTo(pos) > radius) continue;
+      booms.push(this.explode(i));
+    }
+    return booms;
+  }
+
   /** Respawn timers. Call once per physics tick. */
   tick(dt: number): void {
     for (const b of this.barrels) {

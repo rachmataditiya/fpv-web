@@ -32,6 +32,12 @@ export interface HudData {
   hp: number | null;
   /** Bots destroyed (null = no bots on this map). */
   kills: number | null;
+  /** Active weapon label (null = no weapon context → chip hidden). */
+  weaponName: string | null;
+  /** Weapon meter fill 0..1 (heat / charge / cooldown progress). */
+  weaponMeter: number | null;
+  /** Meter micro-label ('HEAT' / 'CHG'). */
+  weaponMeterLabel: string | null;
 }
 
 function fmtMs(ms: number): string {
@@ -113,11 +119,33 @@ const CSS = `
 .hud-hp.low .n{color:var(--warn)}
 .hud-hp.low .fill{background:var(--warn)}
 
+/* ---- weapon chip (next to the throttle column) ---- */
+.hud-wpn{position:absolute;left:64px;bottom:52px;display:none;flex-direction:column;gap:5px;
+  padding:6px 10px;border-radius:8px;background:rgba(11,14,20,.55);
+  border:1px solid rgba(44,55,80,.55);width:max-content}
+.hud-wpn .row{display:flex;align-items:baseline;gap:8px}
+.hud-wpn .n{font-size:13px;font-weight:700;letter-spacing:.1em;color:var(--amber)}
+.hud-wpn .track{width:90px;height:6px;border-radius:3px;background:rgba(233,238,244,.12);
+  overflow:hidden}
+.hud-wpn .fill{height:100%;width:0;background:var(--amber);transition:width .1s}
+
 /* ---- damage vignette (flashed imperatively via pulseDamage) ---- */
 .hud-dmg{position:absolute;inset:0;pointer-events:none;opacity:0;
   box-shadow:inset 0 0 120px 30px rgba(255,40,40,.55)}
 .hud-dmg.on{animation:huddmg .5s ease-out}
 @keyframes huddmg{from{opacity:1}to{opacity:0}}
+
+/* ---- directional hit chevron (orbits screen center toward the shooter) ---- */
+.hud-hitdir{position:absolute;top:50%;left:50%;width:0;height:0;pointer-events:none;opacity:0}
+.hud-hitdir i{position:absolute;left:0;top:-34vmin;transform:translateX(-50%);
+  width:0;height:0;border-left:15px solid transparent;border-right:15px solid transparent;
+  border-bottom:20px solid rgba(255,60,50,.9);filter:drop-shadow(0 0 6px rgba(255,40,40,.6))}
+.hud-hitdir.on{animation:hudhit .6s ease-out}
+@keyframes hudhit{from{opacity:1}to{opacity:0}}
+
+/* ---- kills chip pop (retriggered per kill) ---- */
+.hud-score .n.pop{animation:hudpop .45s ease-out}
+@keyframes hudpop{0%{transform:scale(1)}35%{transform:scale(1.55);color:var(--fg)}100%{transform:scale(1)}}
 
 /* ---- center overlays ---- */
 .hud-count{position:absolute;top:38%;left:50%;transform:translate(-50%,-50%);
@@ -160,7 +188,12 @@ export class Hud {
   private hpEl: HTMLDivElement;
   private hpNEl: HTMLSpanElement;
   private hpFillEl: HTMLDivElement;
+  private wpnEl: HTMLDivElement;
+  private wpnNameEl: HTMLSpanElement;
+  private wpnMeterLblEl: HTMLSpanElement;
+  private wpnFillEl: HTMLDivElement;
   private dmgEl: HTMLDivElement;
+  private hitDirEl: HTMLDivElement;
 
   private prev = {
     armed: null as boolean | null,
@@ -179,6 +212,9 @@ export class Hud {
     score: null as number | null,
     hp: NaN as number | null,
     kills: NaN as number | null,
+    weaponName: null as string | null,
+    weaponMeterPct: -1,
+    weaponMeterLabel: null as string | null,
   };
 
   constructor(mount: HTMLElement) {
@@ -218,9 +254,14 @@ export class Hud {
       </div>
       <div class="hud-horizon"><canvas width="220" height="220" data-r="horizon"></canvas></div>
       <div class="hud-dmg" data-r="dmg"></div>
+      <div class="hud-hitdir" data-r="hitdir"><i></i></div>
       <div class="hud-hp mono" data-r="hp">
         <div class="row"><span class="lbl">integrity</span><span class="n" data-r="hpn">100</span></div>
         <div class="track"><div class="fill" data-r="hpfill"></div></div>
+      </div>
+      <div class="hud-wpn mono" data-r="wpn">
+        <div class="row"><span class="n" data-r="wpnname">BLASTER</span><span class="lbl" data-r="wpnmeterlbl">HEAT</span></div>
+        <div class="track"><div class="fill" data-r="wpnfill"></div></div>
       </div>
       <div class="hud-score mono" data-r="score"><span class="lbl">barrels</span><span class="n" data-r="scoren">0</span><span class="sep" data-r="killsep">·</span><span class="lbl" data-r="killlbl">kills</span><span class="n" data-r="killsn">0</span></div>
       <div class="hud-count mono" data-r="count"></div>
@@ -249,7 +290,12 @@ export class Hud {
     this.hpEl = $('hp');
     this.hpNEl = $('hpn');
     this.hpFillEl = $('hpfill');
+    this.wpnEl = $('wpn');
+    this.wpnNameEl = $('wpnname');
+    this.wpnMeterLblEl = $('wpnmeterlbl');
+    this.wpnFillEl = $('wpnfill');
     this.dmgEl = $('dmg');
+    this.hitDirEl = $('hitdir');
     this.horizonCanvas = this.container.querySelector('[data-r="horizon"]') as HTMLCanvasElement;
     this.horizonCtx = this.horizonCanvas.getContext('2d')!;
   }
@@ -348,6 +394,21 @@ export class Hud {
         this.hpEl.classList.toggle('mid', d.hp >= 25 && d.hp <= 60);
       }
     }
+    // weapon chip: name + meter (heat / charge), hidden without a weapon context
+    if (p.weaponName !== d.weaponName) {
+      p.weaponName = d.weaponName;
+      this.wpnEl.style.display = d.weaponName !== null ? 'flex' : 'none';
+      if (d.weaponName !== null) this.wpnNameEl.textContent = d.weaponName;
+    }
+    if (p.weaponMeterLabel !== d.weaponMeterLabel) {
+      p.weaponMeterLabel = d.weaponMeterLabel;
+      if (d.weaponMeterLabel !== null) this.wpnMeterLblEl.textContent = d.weaponMeterLabel;
+    }
+    const wpnPct = d.weaponMeter === null ? -1 : Math.round(Math.max(0, Math.min(1, d.weaponMeter)) * 100);
+    if (p.weaponMeterPct !== wpnPct) {
+      p.weaponMeterPct = wpnPct;
+      if (wpnPct >= 0) this.wpnFillEl.style.width = `${wpnPct}%`;
+    }
 
     this.drawHorizon(d.rollRad, d.pitchRad);
 
@@ -371,11 +432,27 @@ export class Hud {
   }
 
   /** Flash the red damage vignette (imperative — restarting the CSS animation
-   *  avoids threading a decay timestamp through HudData). */
-  pulseDamage(): void {
+   *  avoids threading a decay timestamp through HudData). When the shooter's
+   *  bearing relative to the camera is known, a chevron at the matching screen
+   *  edge points it out (0 = ahead, +rad = left of the camera). */
+  pulseDamage(bearingRad?: number): void {
     this.dmgEl.classList.remove('on');
     void this.dmgEl.offsetWidth; // reflow restarts the animation
     this.dmgEl.classList.add('on');
+    if (bearingRad !== undefined) {
+      // camera-relative bearing → CSS rotation (positive yaw = left = CCW)
+      this.hitDirEl.style.transform = `rotate(${(-bearingRad * 180) / Math.PI}deg)`;
+      this.hitDirEl.classList.remove('on');
+      void this.hitDirEl.offsetWidth;
+      this.hitDirEl.classList.add('on');
+    }
+  }
+
+  /** "+1" pop on the KILLS chip (retriggered per kill). */
+  pulseKill(): void {
+    this.killsNEl.classList.remove('pop');
+    void this.killsNEl.offsetWidth;
+    this.killsNEl.classList.add('pop');
   }
 
   /** Artificial horizon: translucent sky/ground rotated by −roll, pitch ladder
