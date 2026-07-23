@@ -639,6 +639,7 @@ Object.assign(window as unknown as Record<string, unknown>, {
     quad, settings, params, input, weapon, fx, dt: PHYS_DT,
     get race() { return race; },
     get barrels() { return barrels; },
+    get collisionWorld() { return collisionWorld; },
     /** Drive N physics ticks + one render manually (rAF-independent test hook). */
     step(n = 240): void {
       for (let i = 0; i < n; i++) hooks.simTick(PHYS_DT);

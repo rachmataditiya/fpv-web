@@ -14,6 +14,11 @@ import type { CollisionWorld } from '../physics/quad';
 
 THREE.Mesh.prototype.raycast = acceleratedRaycast;
 
+/** Drone-footprint sample offsets for seam-proof floor casts (radius ≈ 0.1 m). */
+const FLOOR_TAPS: readonly [number, number][] = [
+  [0, 0], [0.1, 0], [-0.1, 0], [0, 0.1], [0, -0.1],
+];
+
 export interface BspWorld {
   group: THREE.Group;
   collision: CollisionWorld;
@@ -143,13 +148,21 @@ export function buildBspWorld(bsp: ParsedBsp): BspWorld {
   }
 
   const collision: CollisionWorld = {
+    // 5-point sampling: GoldSrc floors are seams of many brushes, and a single
+    // point-ray can slip through a crack between them (the dust2 spawn sits on
+    // one!). Casting from the drone's footprint corners too and taking the
+    // HIGHEST floor makes seams unhittable.
     floorAt(x, y, z) {
-      _origin.set(x, y + 0.05, z);
-      ray.set(_origin, _down);
-      ray.far = 2000;
-      const hit = ray.intersectObject(collMesh, false)[0];
+      let best = -Infinity;
+      for (const [dx, dz] of FLOOR_TAPS) {
+        _origin.set(x + dx, y + 0.05, z + dz);
+        ray.set(_origin, _down);
+        ray.far = 2000;
+        const hit = ray.intersectObject(collMesh, false)[0];
+        if (hit && hit.point.y > best) best = hit.point.y;
+      }
       // outside/off the map → the solid base ground, never a void
-      return hit ? Math.max(hit.point.y, baseY) : baseY;
+      return best > -Infinity ? Math.max(best, baseY) : baseY;
     },
     sweep(from, to) {
       _dir.subVectors(to, from);

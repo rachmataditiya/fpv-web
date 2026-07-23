@@ -69,7 +69,6 @@ const _axis = new THREE.Vector3();
 const _prev = new THREE.Vector3();
 const _n = new THREE.Vector3();
 const _d = new THREE.Vector3();
-const _segStart = new THREE.Vector3();
 
 /** One fixed physics step. Returns true if this step ended in a new crash. */
 export function stepQuad(s: QuadState, input: FlightInput, p: QuadParams, dt: number, world?: CollisionWorld): boolean {
@@ -122,21 +121,21 @@ export function stepQuad(s: QuadState, input: FlightInput, p: QuadParams, dt: nu
   // the sweep is what keeps a falling drone on top of map geometry. Arming only
   // decides whether a hard hit counts as a crash.
   //
-  // ITERATIVE + EXTENDED: a single point-cast per tick tunnels in two ways —
-  // (1) corner push-out can land inside the adjacent brush, so the next tick's
-  // segment starts INSIDE solid and DoubleSide finds the exit face first;
-  // (2) a segment that starts exactly on a touched wall can slide through at
-  // grazing angles. So: start the cast one drone-radius BEHIND the motion, pin
-  // the normal against the motion direction (not the velocity, which earlier
-  // iterations may have altered), and resolve up to 3 hits per tick. ---
+  // ITERATIVE: resolve up to 3 hits per tick so a corner push-out that points
+  // into the adjacent brush is corrected within the same tick. The cast uses
+  // the RAW motion segment — do NOT extend it backwards: an extended start
+  // pokes INTO a surface the drone is resting on when it moves away from it,
+  // hits that surface from behind, and the motion-facing normal flip then
+  // shoves the drone THROUGH the floor (that was a real fall-through-spawn
+  // bug). The 1.05×size push-out margin is what keeps the next tick's segment
+  // start safely outside the surface instead. ---
   if (world?.sweep) {
     for (let iter = 0; iter < 3; iter++) {
       _d.subVectors(s.pos, _prev);
       const seg = _d.length();
       if (seg < 1e-9) break;
       _d.multiplyScalar(1 / seg);
-      _segStart.copy(_prev).addScaledVector(_d, -p.size);
-      const hit = world.sweep(_segStart, s.pos);
+      const hit = world.sweep(_prev, s.pos);
       if (!hit) break;
       _n.copy(hit.normal);
       if (_n.dot(_d) > 0) _n.negate(); // face against the motion
