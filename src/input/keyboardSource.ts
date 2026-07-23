@@ -38,7 +38,7 @@ export class KeyboardSource implements InputSource {
   private static readonly HANDLED_CODES = new Set<string>([
     'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown',
     'KeyA', 'KeyD', 'KeyW', 'KeyS',
-    'Enter', 'KeyR', 'KeyV', 'Escape', 'Space',
+    'Enter', 'KeyR', 'KeyV', 'Escape', 'Space', 'Backspace',
   ]);
 
   constructor() {
@@ -82,8 +82,9 @@ export class KeyboardSource implements InputSource {
     this.buttons[1] = this.held.has('KeyR');
     this.buttons[2] = this.held.has('KeyV');
     this.buttons[3] = this.held.has('Escape');
-    this.buttons[4] = this.held.has('Space');   // shoot
-    // buttons 5‑7 remain false (they can be mapped externally later)
+    this.buttons[4] = this.held.has('Space');     // shoot
+    this.buttons[5] = this.held.has('Backspace'); // restart race
+    // buttons 6‑7 remain false (they can be mapped externally later)
   }
 
   /**

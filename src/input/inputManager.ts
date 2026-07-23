@@ -15,7 +15,7 @@ export class InputManager {
   private sources: InputSource[];
   private profile: Profile | null = null;
   private profileId: string | null = null;
-  private prevBtn: Record<Action, boolean> = { arm: false, respawn: false, camera: false, pause: false, shoot: false };
+  private prevBtn: Record<Action, boolean> = { arm: false, respawn: false, camera: false, pause: false, shoot: false, restart: false };
   private out: FlightInput = { rollRate: 0, pitchRate: 0, yawRate: 0, throttle: 0 };
 
   /** Fired on a mapped button's unpressed→pressed edge. */

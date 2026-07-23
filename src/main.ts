@@ -290,6 +290,9 @@ input.onAction = (a) => {
     case 'shoot':
       if (quad.armed && !quad.crashed) weapon.requestFire();
       break;
+    case 'restart':
+      restartRace();
+      break;
   }
 };
 

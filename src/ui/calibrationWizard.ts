@@ -29,6 +29,7 @@ const BTNS: [Action, string][] = [
   ['camera', 'Camera view'],
   ['pause', 'Pause'],
   ['shoot', 'Shoot'],
+  ['restart', 'Restart race'],
 ];
 
 export interface PanelDeps {

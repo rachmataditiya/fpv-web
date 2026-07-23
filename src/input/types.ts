@@ -28,8 +28,8 @@ export interface FlightInput {
 }
 
 /** Mappable button actions (edge-triggered by the InputManager). */
-export type Action = 'arm' | 'respawn' | 'camera' | 'pause' | 'shoot';
-export const ACTIONS: readonly Action[] = ['arm', 'respawn', 'camera', 'pause', 'shoot'];
+export type Action = 'arm' | 'respawn' | 'camera' | 'pause' | 'shoot' | 'restart';
+export const ACTIONS: readonly Action[] = ['arm', 'respawn', 'camera', 'pause', 'shoot', 'restart'];
 
 /** Per-function axis mapping (function → physical axis + response curve). */
 export interface AxisMap {

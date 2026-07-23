@@ -19,7 +19,7 @@ function baseProfile(): Profile {
       yaw: RATE_AXIS(400),
       throttle: { axis: null, invert: false, deadzone: 0.02, expo: 0 },
     },
-    buttons: { arm: null, respawn: null, camera: null, pause: null, shoot: null },
+    buttons: { arm: null, respawn: null, camera: null, pause: null, shoot: null, restart: null },
   };
 }
 
@@ -37,6 +37,7 @@ function seedFor(id: string): Profile {
     p.axes.yaw.axis = 3;
     p.buttons.arm = 1; // C1 button (byte-0 bit 1); bit 4 rests HIGH — never seed it
     p.buttons.shoot = 2; // C2 button (bit 2)
+    p.buttons.restart = 5; // record/shutter button (bit 5)
   } else if (id === 'keyboard') {
     p.axes.roll.axis = 0;
     p.axes.pitch.axis = 1;
@@ -47,14 +48,14 @@ function seedFor(id: string): Profile {
     p.axes.roll.rate = 400;    // full-rate 667°/s is unflyable on binary keys
     p.axes.pitch.rate = 400;
     p.axes.yaw.rate = 220;
-    p.buttons = { arm: 0, respawn: 1, camera: 2, pause: 3, shoot: 4 }; // shoot = Space
+    p.buttons = { arm: 0, respawn: 1, camera: 2, pause: 3, shoot: 4, restart: 5 }; // Space=shoot, Backspace=restart
   } else {
     // Generic gamepad (Mode-2)
     p.axes.roll.axis = 2;
     p.axes.pitch.axis = 3;
     p.axes.throttle.axis = 1;
     p.axes.yaw.axis = 0;
-    p.buttons = { arm: 0, respawn: 1, camera: 3, pause: 9, shoot: 7 }; // shoot = RT
+    p.buttons = { arm: 0, respawn: 1, camera: 3, pause: 9, shoot: 7, restart: 8 }; // RT=shoot, Back=restart
   }
   return p;
 }
