@@ -32,6 +32,12 @@ export interface HudData {
   hp: number | null;
   /** Bots destroyed (null = no bots on this map). */
   kills: number | null;
+  /** Active weapon label (null = no weapon context → chip hidden). */
+  weaponName: string | null;
+  /** Weapon meter fill 0..1 (heat / charge / cooldown progress). */
+  weaponMeter: number | null;
+  /** Meter micro-label ('HEAT' / 'CHG'). */
+  weaponMeterLabel: string | null;
 }
 
 function fmtMs(ms: number): string {
@@ -113,6 +119,16 @@ const CSS = `
 .hud-hp.low .n{color:var(--warn)}
 .hud-hp.low .fill{background:var(--warn)}
 
+/* ---- weapon chip (next to the throttle column) ---- */
+.hud-wpn{position:absolute;left:64px;bottom:52px;display:none;flex-direction:column;gap:5px;
+  padding:6px 10px;border-radius:8px;background:rgba(11,14,20,.55);
+  border:1px solid rgba(44,55,80,.55);width:max-content}
+.hud-wpn .row{display:flex;align-items:baseline;gap:8px}
+.hud-wpn .n{font-size:13px;font-weight:700;letter-spacing:.1em;color:var(--amber)}
+.hud-wpn .track{width:90px;height:6px;border-radius:3px;background:rgba(233,238,244,.12);
+  overflow:hidden}
+.hud-wpn .fill{height:100%;width:0;background:var(--amber);transition:width .1s}
+
 /* ---- damage vignette (flashed imperatively via pulseDamage) ---- */
 .hud-dmg{position:absolute;inset:0;pointer-events:none;opacity:0;
   box-shadow:inset 0 0 120px 30px rgba(255,40,40,.55)}
@@ -172,6 +188,10 @@ export class Hud {
   private hpEl: HTMLDivElement;
   private hpNEl: HTMLSpanElement;
   private hpFillEl: HTMLDivElement;
+  private wpnEl: HTMLDivElement;
+  private wpnNameEl: HTMLSpanElement;
+  private wpnMeterLblEl: HTMLSpanElement;
+  private wpnFillEl: HTMLDivElement;
   private dmgEl: HTMLDivElement;
   private hitDirEl: HTMLDivElement;
 
@@ -192,6 +212,9 @@ export class Hud {
     score: null as number | null,
     hp: NaN as number | null,
     kills: NaN as number | null,
+    weaponName: null as string | null,
+    weaponMeterPct: -1,
+    weaponMeterLabel: null as string | null,
   };
 
   constructor(mount: HTMLElement) {
@@ -236,6 +259,10 @@ export class Hud {
         <div class="row"><span class="lbl">integrity</span><span class="n" data-r="hpn">100</span></div>
         <div class="track"><div class="fill" data-r="hpfill"></div></div>
       </div>
+      <div class="hud-wpn mono" data-r="wpn">
+        <div class="row"><span class="n" data-r="wpnname">BLASTER</span><span class="lbl" data-r="wpnmeterlbl">HEAT</span></div>
+        <div class="track"><div class="fill" data-r="wpnfill"></div></div>
+      </div>
       <div class="hud-score mono" data-r="score"><span class="lbl">barrels</span><span class="n" data-r="scoren">0</span><span class="sep" data-r="killsep">·</span><span class="lbl" data-r="killlbl">kills</span><span class="n" data-r="killsn">0</span></div>
       <div class="hud-count mono" data-r="count"></div>
       <div class="hud-msg" data-r="msg"></div>`;
@@ -263,6 +290,10 @@ export class Hud {
     this.hpEl = $('hp');
     this.hpNEl = $('hpn');
     this.hpFillEl = $('hpfill');
+    this.wpnEl = $('wpn');
+    this.wpnNameEl = $('wpnname');
+    this.wpnMeterLblEl = $('wpnmeterlbl');
+    this.wpnFillEl = $('wpnfill');
     this.dmgEl = $('dmg');
     this.hitDirEl = $('hitdir');
     this.horizonCanvas = this.container.querySelector('[data-r="horizon"]') as HTMLCanvasElement;
@@ -362,6 +393,21 @@ export class Hud {
         this.hpEl.classList.toggle('low', d.hp < 25);
         this.hpEl.classList.toggle('mid', d.hp >= 25 && d.hp <= 60);
       }
+    }
+    // weapon chip: name + meter (heat / charge), hidden without a weapon context
+    if (p.weaponName !== d.weaponName) {
+      p.weaponName = d.weaponName;
+      this.wpnEl.style.display = d.weaponName !== null ? 'flex' : 'none';
+      if (d.weaponName !== null) this.wpnNameEl.textContent = d.weaponName;
+    }
+    if (p.weaponMeterLabel !== d.weaponMeterLabel) {
+      p.weaponMeterLabel = d.weaponMeterLabel;
+      if (d.weaponMeterLabel !== null) this.wpnMeterLblEl.textContent = d.weaponMeterLabel;
+    }
+    const wpnPct = d.weaponMeter === null ? -1 : Math.round(Math.max(0, Math.min(1, d.weaponMeter)) * 100);
+    if (p.weaponMeterPct !== wpnPct) {
+      p.weaponMeterPct = wpnPct;
+      if (wpnPct >= 0) this.wpnFillEl.style.width = `${wpnPct}%`;
     }
 
     this.drawHorizon(d.rollRad, d.pitchRad);

@@ -15,9 +15,10 @@ import type { CollisionWorld, QuadState } from '../physics/quad';
 import type { QuadParams } from '../physics/params';
 import type { FlightInput } from '../input/types';
 import { Weapon } from './weapon';
+import type { WeaponState } from './weapon';
 import { TargetRegistry } from './targetRegistry';
 import { PlayerHealth } from './playerHealth';
-import { BotManager, PLAYER_SHOT_DAMAGE } from './bots/botManager';
+import { BotManager } from './bots/botManager';
 import type { BotsSnapshot } from './bots/botManager';
 import type { Bot, SoldierTuning } from './bots/types';
 import { SOLDIER_HEIGHT } from '../render/soldierMesh';
@@ -56,11 +57,9 @@ export interface QuadSnapshot {
   crashTimer: number;
 }
 
-export interface WeaponSnapshot {
-  cooldown: number;
-  heat: number;
-  rngState: number;
-}
+/** Weapon.serialize() shape — config included (Wave 4), so a killcam recorded
+ *  mid-burst/mid-charge restores the right weapon and shot timing. */
+export type WeaponSnapshot = WeaponState;
 
 export interface Snapshot {
   tick: number;
@@ -331,8 +330,8 @@ export class ReplayPlayer {
         get targets() {
           return bm.targets;
         },
-        onHit: (i) => {
-          const died = bm.hit(i, PLAYER_SHOT_DAMAGE);
+        onHit: (i, damage) => {
+          const died = bm.hit(i, damage);
           if (died) fx?.explosion(died.pos);
           else fx?.impact(bm.targets[i].pos);
         },
@@ -394,8 +393,9 @@ export class ReplayPlayer {
     if (cfg.oobY !== null && quad.pos.y < cfg.oobY) this.respawn();
     if (quad.crashed && quad.crashTimer <= 0) this.respawn();
 
-    // --- weapon: hold-to-autofire, aim along the uptilted FPV camera ---
-    if ((tickIn.f & 1) !== 0 && quad.armed && !quad.crashed) this.weapon.requestFire();
+    // --- weapon: trigger level mirrors main.ts's setTriggerHeld (hold-to-
+    // autofire on instant configs, hold-to-charge on the railgun) ---
+    this.weapon.setTriggerHeld((tickIn.f & 1) !== 0 && quad.armed && !quad.crashed);
     _uptiltQ.setFromAxisAngle(_aimX, (cfg.uptiltDeg * Math.PI) / 180);
     _aimQ.copy(quad.q).multiply(_uptiltQ);
     const shot = this.weapon.tick(dt, quad.pos, _aimQ, cfg.world, this.registry.collect());
@@ -403,7 +403,7 @@ export class ReplayPlayer {
       cfg.fx?.tracer(shot.from, shot.to);
       cfg.fx?.muzzle(shot.from);
       if (shot.hitWorld) cfg.fx?.impact(shot.to);
-      if (shot.targetIndex !== null) this.registry.dispatchHit(shot.targetIndex);
+      if (shot.targetIndex !== null) this.registry.dispatchHit(shot.targetIndex, shot.damage);
     }
 
     // --- bots (a bot killed this tick cannot return fire — same order) ---

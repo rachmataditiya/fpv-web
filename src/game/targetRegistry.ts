@@ -6,11 +6,12 @@
  *  fixed-length target arrays (dead entries stay in place with alive=false),
  *  and both walk the sources in registration order. */
 import type { ShotTarget } from './weapon';
+import { PLAYER_SHOT_DAMAGE } from './bots/types';
 
 export interface TargetSource {
   targets: readonly ShotTarget[];
   /** The player's shot hit this source's target at localIndex. */
-  onHit(localIndex: number): void;
+  onHit(localIndex: number, damage: number): void;
 }
 
 export class TargetRegistry {
@@ -30,12 +31,13 @@ export class TargetRegistry {
     return this.flat;
   }
 
-  /** Route Weapon's targetIndex (into the last collect()) back to its source. */
-  dispatchHit(globalIndex: number): void {
+  /** Route Weapon's targetIndex (into the last collect()) back to its source,
+   *  carrying the shot's damage (default = legacy blaster damage). */
+  dispatchHit(globalIndex: number, damage: number = PLAYER_SHOT_DAMAGE): void {
     let i = globalIndex;
     for (const s of this.sources) {
       if (i < s.targets.length) {
-        s.onHit(i);
+        s.onHit(i, damage);
         return;
       }
       i -= s.targets.length;

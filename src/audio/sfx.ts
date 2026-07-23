@@ -31,6 +31,168 @@ export class Sfx {
     this.rifle(0.55, 0.85);
   }
 
+  /** Burst-fire round — the player blaster pitched up a touch, one call per
+   *  round of the 3-round burst. */
+  burst(): void {
+    this.rifle(1.2, 0.9);
+  }
+
+  /**
+   * Railgun discharge — heavy layered one-shot: a low 50 Hz boom, a bright
+   * band-passed noise zap sweeping down fast, and a ~0.4 s tail. Louder than
+   * the blaster.
+   */
+  railgun(): void {
+    this.ensureContext();
+    if (Sfx.disabled || !Sfx.ctx || !Sfx.masterGain) return;
+
+    const now = Sfx.ctx.currentTime;
+    if (Sfx.activeCount >= Sfx.MAX_ACTIVE) return;
+    Sfx.activeCount++;
+
+    let remainingSources = 3; // boom + zap + tail
+    const onEnded = () => {
+      if (--remainingSources === 0) Sfx.activeCount--;
+    };
+
+    // (1) BOOM — low sine thud, the chest hit.
+    const boom = Sfx.ctx.createOscillator();
+    boom.type = 'sine';
+    boom.frequency.setValueAtTime(50, now);
+    boom.frequency.exponentialRampToValueAtTime(32, now + 0.4);
+    const boomGain = Sfx.ctx.createGain();
+    boomGain.gain.setValueAtTime(0.95, now);
+    boomGain.gain.exponentialRampToValueAtTime(0.001, now + 0.4);
+    boom.connect(boomGain).connect(Sfx.masterGain);
+    boom.start(now);
+    boom.stop(now + 0.42);
+    boom.onended = () => {
+      boom.disconnect();
+      boomGain.disconnect();
+      onEnded();
+    };
+
+    // (2) ZAP — bright band-passed noise with a fast downward sweep.
+    const zap = Sfx.ctx.createBufferSource();
+    zap.buffer = this.getNoiseBuffer();
+    const zapBp = Sfx.ctx.createBiquadFilter();
+    zapBp.type = 'bandpass';
+    zapBp.frequency.setValueAtTime(3800, now);
+    zapBp.frequency.exponentialRampToValueAtTime(500, now + 0.14);
+    zapBp.Q.value = 1.4;
+    const zapGain = Sfx.ctx.createGain();
+    zapGain.gain.setValueAtTime(0.8, now);
+    zapGain.gain.exponentialRampToValueAtTime(0.001, now + 0.16);
+    zap.connect(zapBp).connect(zapGain).connect(Sfx.masterGain);
+    zap.start(now);
+    zap.stop(now + 0.17);
+    zap.onended = () => {
+      zap.disconnect();
+      zapBp.disconnect();
+      zapGain.disconnect();
+      onEnded();
+    };
+
+    // (3) TAIL — low-passed noise wash decaying over ~0.4 s.
+    const tail = Sfx.ctx.createBufferSource();
+    tail.buffer = this.getNoiseBuffer();
+    const tailLp = Sfx.ctx.createBiquadFilter();
+    tailLp.type = 'lowpass';
+    tailLp.frequency.setValueAtTime(1400, now);
+    tailLp.frequency.exponentialRampToValueAtTime(120, now + 0.4);
+    const tailGain = Sfx.ctx.createGain();
+    tailGain.gain.setValueAtTime(0.45, now);
+    tailGain.gain.exponentialRampToValueAtTime(0.001, now + 0.42);
+    tail.connect(tailLp).connect(tailGain).connect(Sfx.masterGain);
+    tail.start(now);
+    tail.stop(now + 0.44);
+    tail.onended = () => {
+      tail.disconnect();
+      tailLp.disconnect();
+      tailGain.disconnect();
+      onEnded();
+    };
+  }
+
+  /** Railgun charge-up — quiet rising sine 300→900 Hz over ~0.8 s, fired when
+   *  a charge STARTS (the release gets railgun()). */
+  chargeUp(): void {
+    this.ensureContext();
+    if (Sfx.disabled || !Sfx.ctx || !Sfx.masterGain) return;
+
+    const now = Sfx.ctx.currentTime;
+    if (Sfx.activeCount >= Sfx.MAX_ACTIVE) return;
+    Sfx.activeCount++;
+
+    const dur = 0.8;
+    const osc = Sfx.ctx.createOscillator();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(300, now);
+    osc.frequency.linearRampToValueAtTime(900, now + dur);
+    const gainNode = Sfx.ctx.createGain();
+    gainNode.gain.setValueAtTime(0.001, now);
+    gainNode.gain.exponentialRampToValueAtTime(0.12, now + 0.08);
+    gainNode.gain.setValueAtTime(0.12, now + dur - 0.1);
+    gainNode.gain.exponentialRampToValueAtTime(0.001, now + dur);
+    osc.connect(gainNode).connect(Sfx.masterGain);
+    osc.start(now);
+    osc.stop(now + dur);
+    osc.onended = () => {
+      osc.disconnect();
+      gainNode.disconnect();
+      Sfx.activeCount--;
+    };
+  }
+
+  /** Pickup acquired — pleasant two-tone blip (660→990 triangle, like lap()
+   *  but shorter). */
+  pickup(): void {
+    this.ensureContext();
+    if (Sfx.disabled || !Sfx.ctx || !Sfx.masterGain) return;
+
+    const now = Sfx.ctx.currentTime;
+    if (Sfx.activeCount >= Sfx.MAX_ACTIVE) return;
+    Sfx.activeCount++;
+
+    let remainingSources = 2;
+    const onEnded = () => {
+      if (--remainingSources === 0) Sfx.activeCount--;
+    };
+
+    // --- first tone: 660 Hz, 60 ms ---
+    const osc1 = Sfx.ctx.createOscillator();
+    osc1.type = 'triangle';
+    osc1.frequency.setValueAtTime(660, now);
+    const gain1 = Sfx.ctx.createGain();
+    gain1.gain.setValueAtTime(0.3, now);
+    gain1.gain.exponentialRampToValueAtTime(0.001, now + 0.06);
+    osc1.connect(gain1).connect(Sfx.masterGain);
+    osc1.start(now);
+    osc1.stop(now + 0.06);
+    osc1.onended = () => {
+      osc1.disconnect();
+      gain1.disconnect();
+      onEnded();
+    };
+
+    // --- second tone: 990 Hz, starts at 0.06 s ---
+    const start2 = now + 0.06;
+    const osc2 = Sfx.ctx.createOscillator();
+    osc2.type = 'triangle';
+    osc2.frequency.setValueAtTime(990, start2);
+    const gain2 = Sfx.ctx.createGain();
+    gain2.gain.setValueAtTime(0.3, start2);
+    gain2.gain.exponentialRampToValueAtTime(0.001, start2 + 0.06);
+    osc2.connect(gain2).connect(Sfx.masterGain);
+    osc2.start(start2);
+    osc2.stop(start2 + 0.06);
+    osc2.onended = () => {
+      osc2.disconnect();
+      gain2.disconnect();
+      onEnded();
+    };
+  }
+
   /**
    * Enemy drone rotor whirr, pinged periodically while one is nearby.
    * distance01: 0 = on top of you, 1 = at the edge of earshot.

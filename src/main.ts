@@ -20,10 +20,12 @@ import { parseWad } from './world/bsp/wadParser';
 import { loadMap } from './world/bsp/mapStore';
 import { saveProfile } from './input/profiles';
 import { Weapon } from './game/weapon';
+import type { WeaponId } from './game/weapon';
 import { BarrelField, BARREL_BLAST_RADIUS } from './game/barrels';
+import { PickupField } from './game/pickups';
 import { TargetRegistry } from './game/targetRegistry';
 import { PlayerHealth } from './game/playerHealth';
-import { BotManager, PLAYER_SHOT_DAMAGE } from './game/bots/botManager';
+import { BotManager } from './game/bots/botManager';
 import { DEFAULT_SQUAD } from './game/bots/types';
 import { ReplayRecorder, ReplayPlayer } from './game/replay';
 import type { QuadSnapshot } from './game/replay';
@@ -129,6 +131,9 @@ const weapon = new Weapon();
 const targetRegistry = new TargetRegistry();
 const playerHealth = new PlayerHealth(100);
 let barrels: BarrelField | null = null;
+let pickups: PickupField | null = null;
+let pickupMeshes: THREE.Group[] = [];
+let pickupPhase = 0; // render-only bob/spin accumulator (frameDt-driven)
 let bots: BotManager | null = null;
 /** Builds bots identical to the live set — stored by the BSP-load closure so
  *  killcam playback bots match exactly (world/bounds/spawns/squad/seed/diff). */
@@ -194,6 +199,34 @@ let messageUntil = 0;
 function flash(msg: string, ms = 1500): void {
   message = msg;
   messageUntil = performance.now() + ms;
+}
+
+// ---------- player arsenal (Wave 4): blaster / burst / railgun ----------
+const WEAPON_CYCLE: readonly WeaponId[] = ['blaster', 'burst', 'railgun'];
+let currentWeapon: WeaponId = 'blaster';
+function switchWeapon(id: WeaponId): void {
+  if (id === currentWeapon) return;
+  currentWeapon = id;
+  weapon.setConfig(id);
+  flash(weapon.config.name, 700);
+}
+
+/** Procedural pickup icon: octahedron core + wireframe shell ring, tinted
+ *  per weapon (blaster green / burst amber / railgun cyan). */
+const PICKUP_COLORS: Record<WeaponId, number> = { blaster: 0x3ddc84, burst: 0xffb020, railgun: 0x49c8ff };
+function createPickupMesh(id: WeaponId): THREE.Group {
+  const color = PICKUP_COLORS[id];
+  const core = new THREE.Mesh(
+    new THREE.OctahedronGeometry(0.25),
+    new THREE.MeshBasicMaterial({ color }),
+  );
+  const ring = new THREE.Mesh(
+    new THREE.TorusGeometry(0.42, 0.02, 8, 32),
+    new THREE.MeshBasicMaterial({ color, wireframe: true }),
+  );
+  const g = new THREE.Group();
+  g.add(core, ring);
+  return g;
 }
 
 const onRaceEvent = (e: RaceEvent): void => {
@@ -376,6 +409,17 @@ if (bspName) {
         },
       });
 
+      // weapon pickups scattered on real floors (burst/railgun/blaster mix)
+      const pf = new PickupField(world.collision, { minX, maxX, minZ, maxZ }, spawnCheckpoint.pos, 7331, world.geometryFloorAt);
+      pickups = pf;
+      pickupMeshes = pf.pickups.map((p) => {
+        const m = createPickupMesh(p.weapon);
+        m.position.copy(p.pos);
+        m.visible = p.alive;
+        scene.add(m);
+        return m;
+      });
+
       // enemy bots (war mode): the 5-bot squad (rifle/sniper/heavy soldiers +
       // scout/rifle drones), spawned on real floors
       if (settings.bots) {
@@ -397,8 +441,8 @@ if (bspName) {
         scene.add(bm.group);
         targetRegistry.register({
           get targets() { return bm.targets; },
-          onHit: (i) => {
-            const died = bm.hit(i, PLAYER_SHOT_DAMAGE);
+          onHit: (i, damage) => {
+            const died = bm.hit(i, damage);
             if (died) {
               recorder.logEvent('bot-died', [died.pos.x, died.pos.y, died.pos.z]);
               fx.explosion(died.pos);
@@ -476,6 +520,18 @@ input.onAction = (a) => {
       break;
     case 'restart':
       restartRace();
+      break;
+    case 'weapon1':
+      switchWeapon('blaster');
+      break;
+    case 'weapon2':
+      switchWeapon('burst');
+      break;
+    case 'weapon3':
+      switchWeapon('railgun');
+      break;
+    case 'weaponNext':
+      switchWeapon(WEAPON_CYCLE[(WEAPON_CYCLE.indexOf(currentWeapon) + 1) % WEAPON_CYCLE.length]);
       break;
   }
 };
@@ -706,6 +762,9 @@ const hudData: HudData = {
   score: null,
   hp: null,
   kills: null,
+  weaponName: null,
+  weaponMeter: null,
+  weaponMeterLabel: null,
 };
 
 const _e = new THREE.Euler();
@@ -742,22 +801,38 @@ const hooks = {
 
     if (race && !settings.freeFly && !editingTrack) race.update(dt, prevPos, quad.pos);
 
-    // weapon + barrels — hold to auto-fire; aim follows the FPV CAMERA (body
-    // forward rotated up by the camera uptilt) so shots land on the crosshair.
-    if (quad.armed && !quad.crashed && input.held('shoot')) weapon.requestFire();
+    // weapon + barrels — trigger level drives auto-fire (instant configs) or
+    // the railgun charge; aim follows the FPV CAMERA (body forward rotated up
+    // by the camera uptilt) so shots land on the crosshair.
+    weapon.setTriggerHeld(quad.armed && !quad.crashed && input.held('shoot'));
+    const chargeWas = weapon.charge01();
     _uptiltQ.setFromAxisAngle(_aimX, (settings.uptiltDeg * Math.PI) / 180);
     _aimQ.copy(quad.q).multiply(_uptiltQ);
     const shot = weapon.tick(dt, quad.pos, _aimQ, collisionWorld, targetRegistry.collect());
+    if (chargeWas === 0 && weapon.charge01() > 0) sfx.chargeUp(); // charge-start edge
     if (shot) {
       recorder.logEvent('shot', [shot.from.x, shot.from.y, shot.from.z, shot.to.x, shot.to.y, shot.to.z]);
-      fx.tracer(shot.from, shot.to);
-      fx.muzzle(shot.from);
+      if (currentWeapon === 'railgun') {
+        fx.tracerThick(shot.from, shot.to); // includes the bigger muzzle
+        sfx.railgun();
+      } else {
+        fx.tracer(shot.from, shot.to);
+        fx.muzzle(shot.from);
+        if (currentWeapon === 'burst') sfx.burst();
+        else sfx.shoot();
+      }
       if (shot.hitWorld) fx.impact(shot.to);
-      sfx.shoot();
-      if (shot.targetIndex !== null) targetRegistry.dispatchHit(shot.targetIndex);
+      if (shot.targetIndex !== null) targetRegistry.dispatchHit(shot.targetIndex, shot.damage);
       bots?.suppressNear(shot.from, shot.to); // near misses rattle soldiers' aim
     }
     barrels?.tick(dt);
+    if (pickups) {
+      for (const ev of pickups.tick(dt, quad.pos, !quad.crashed)) {
+        switchWeapon(ev.weapon);
+        sfx.pickup();
+        flash(`${weapon.config.name} ACQUIRED`, 900);
+      }
+    }
     if (bots) {
       bots.passive = editingTrack;
       // player's shot resolved above — a bot killed this tick cannot return fire
@@ -844,6 +919,21 @@ const hooks = {
       bots?.updateVisuals(frameDt, renderPos);
     }
 
+    // pickup icons: float bob + spin (render-only phase, frameDt-accumulated),
+    // positions/visibility synced from sim state
+    if (pickups) {
+      pickupPhase += frameDt;
+      for (let i = 0; i < pickupMeshes.length; i++) {
+        const p = pickups.pickups[i];
+        const m = pickupMeshes[i];
+        m.visible = p.alive;
+        if (p.alive) {
+          m.position.set(p.pos.x, p.pos.y + Math.sin(pickupPhase * 2 + i * 1.7) * 0.15, p.pos.z);
+          m.rotation.y = pickupPhase * 1.5 + i;
+        }
+      }
+    }
+
     // heavy-rocket sprites follow whichever bot manager is on screen (during
     // killcam the live bots are hidden — the playback manager owns the pool)
     const shownBots = killcam ? killcam.player.bots : bots;
@@ -877,6 +967,16 @@ const hooks = {
     hudData.score = barrels ? barrels.score : null;
     hudData.hp = bots ? playerHealth.hp : null;
     hudData.kills = bots ? bots.kills : null;
+    // weapon chip: heat on instant configs; charge while charging, else
+    // cooldown recovery on the railgun
+    hudData.weaponName = weapon.config.name;
+    if (weapon.config.chargeS > 0) {
+      hudData.weaponMeter = weapon.charge01() > 0 ? weapon.charge01() : 1 - weapon.cooldown01();
+      hudData.weaponMeterLabel = 'CHG';
+    } else {
+      hudData.weaponMeter = weapon.heat01();
+      hudData.weaponMeterLabel = 'HEAT';
+    }
     hudData.camera = rig.getMode();
     const cd = race && !settings.freeFly ? race.countdownLeft() : null;
     hudData.countdown = cd !== null ? Math.ceil(cd) : null;
@@ -905,6 +1005,7 @@ Object.assign(window as unknown as Record<string, unknown>, {
     get killcam() { return killcam; },
     get race() { return race; },
     get barrels() { return barrels; },
+    get pickups() { return pickups; },
     get bots() { return bots; },
     get collisionWorld() { return collisionWorld; },
     /** Drive N physics ticks + one render manually (rAF-independent test hook). */
