@@ -41,6 +41,7 @@ function soldier(x = 0, z = 0, yaw = 0, seed = 7): Bot {
     alive: true,
     hp: S.hp,
     state: 'patrol',
+    tune: { ...S },
     vel: new THREE.Vector3(),
     yaw,
     respawnIn: 0,
@@ -174,6 +175,7 @@ function droneBot(x = 0, y = 6, z = 0, yaw = 0, seed = 21): Bot {
   b.pos.set(x, y, z);
   b.radius = DR.hitRadius;
   b.hp = DR.hp;
+  b.tune = { ...DR };
   return b;
 }
 

@@ -271,28 +271,34 @@ if (bspName) {
       });
 
       // enemy bots (war mode): 2 drones + 3 soldiers, spawned on real floors
-      const bm = new BotManager(
-        world.collision,
-        { minX, maxX, minZ, maxZ },
-        spawnCheckpoint.pos,
-        world.geometryFloorAt,
-        bsp.spawns.slice(1), // the map's unused player spawns make natural bot posts
-      );
-      bots = bm;
-      scene.add(bm.group);
-      targetRegistry.register({
-        get targets() { return bm.targets; },
-        onHit: (i) => {
-          const died = bm.hit(i, PLAYER_SHOT_DAMAGE);
-          if (died) {
-            fx.explosion(died.pos);
-            sfx.explode();
-            flash(`${died.kind === 'drone' ? 'DRONE' : 'SOLDIER'} DOWN — ${bm.kills}`, 900);
-          } else {
-            fx.impact(bm.targets[i].pos);
-          }
-        },
-      });
+      if (settings.bots) {
+        const bm = new BotManager(
+          world.collision,
+          { minX, maxX, minZ, maxZ },
+          spawnCheckpoint.pos,
+          world.geometryFloorAt,
+          bsp.spawns.slice(1), // the map's unused player spawns make natural bot posts
+          { drones: 2, soldiers: 3 },
+          4242,
+          { difficulty: settings.botDifficulty, fx },
+        );
+        bots = bm;
+        scene.add(bm.group);
+        targetRegistry.register({
+          get targets() { return bm.targets; },
+          onHit: (i) => {
+            const died = bm.hit(i, PLAYER_SHOT_DAMAGE);
+            if (died) {
+              fx.explosion(died.pos);
+              sfx.explode();
+              hud.pulseKill();
+              flash(`${died.kind === 'drone' ? 'DRONE' : 'SOLDIER'} DOWN — ${bm.kills}`, 900);
+            } else {
+              fx.impact(bm.targets[i].pos);
+            }
+          },
+        });
+      }
 
       // race track: player-edited first, then the map folder's published
       // track.json. NOT auto-started — BSP maps default to WAR mode (free fly
@@ -439,6 +445,8 @@ const settingsPanel = new SettingsPanel(ui, {
     freeFly: (on) => {
       if (!on) restartRace(); // leaving free-fly = fresh race
     },
+    bots: (on) => flash(on ? 'BOTS ON — NEXT MAP LOAD' : 'BOTS OFF — NEXT MAP LOAD'),
+    botDifficulty: (d) => flash(`BOT DIFFICULTY: ${d.toUpperCase()} — NEXT MAP LOAD`),
   },
   save: () => saveSettings(settings),
   rates: {
@@ -580,9 +588,11 @@ const hudData: HudData = {
 };
 
 const _e = new THREE.Euler();
+const _hitEuler = new THREE.Euler();
 const _aimQ = new THREE.Quaternion();
 const _uptiltQ = new THREE.Quaternion();
 const _aimX = new THREE.Vector3(1, 0, 0);
+let whirrAcc = 0; // sim seconds since the last enemy-drone whirr ping
 
 const hooks = {
   simTick(dt: number) {
@@ -630,9 +640,12 @@ const hooks = {
         if (ev.type !== 'bot-shot') continue;
         fx.tracer(ev.from, ev.to);
         fx.muzzle(ev.from);
-        sfx.shoot();
+        sfx.botShoot();
         if (ev.hitPlayer && !quad.crashed) {
-          hud.pulseDamage();
+          // bearing of the shooter relative to the camera yaw → edge chevron
+          _hitEuler.setFromQuaternion(quad.q, 'YXZ');
+          const sy = Math.atan2(-(ev.from.x - quad.pos.x), -(ev.from.z - quad.pos.z));
+          hud.pulseDamage(Math.atan2(Math.sin(sy - _hitEuler.y), Math.cos(sy - _hitEuler.y)));
           if (playerHealth.damage(ev.damage)) {
             quad.crashed = true;
             quad.crashTimer = params.respawnDelay;
@@ -641,6 +654,17 @@ const hooks = {
             flash('YOU DIED');
           }
         }
+      }
+      // enemy rotor whirr — a ping every ~2s of sim time while a drone is near
+      const wd = bots.nearestAliveDroneDist(quad.pos);
+      if (wd < 30 && !quad.crashed) {
+        whirrAcc += dt;
+        if (whirrAcc >= 2) {
+          whirrAcc = 0;
+          sfx.droneWhirr(wd / 30);
+        }
+      } else {
+        whirrAcc = 0;
       }
     }
   },

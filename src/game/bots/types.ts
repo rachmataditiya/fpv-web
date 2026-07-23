@@ -87,10 +87,19 @@ export const PLAYER_TARGET_RADIUS = 0.3;
 /** Bot blaster reach — shorter than the player's 300 m so sniping is a player edge. */
 export const BOT_WEAPON_RANGE = 120;
 
+/** Writable copy of a readonly tuning block (all-numeric fields). */
+export type MutableTuning<T> = { -readonly [K in keyof T]: number };
+/** Per-bot tuning snapshots — difficulty-scaled at BotManager construction. */
+export type DroneTuning = MutableTuning<typeof TUNING.drone>;
+export type SoldierTuning = MutableTuning<typeof TUNING.soldier>;
+export type BotTuning = DroneTuning | SoldierTuning;
+
 export interface Bot extends ShotTarget {
   kind: BotKind;
   hp: number;
   state: BotAiState;
+  /** Difficulty-scaled tuning snapshot — botBrain reads this, never TUNING. */
+  tune: BotTuning;
   vel: THREE.Vector3;
   /** Facing, rad about +Y — mesh rotation convention: facing dir = (−sin yaw, 0, −cos yaw). */
   yaw: number;

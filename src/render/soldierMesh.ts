@@ -24,6 +24,9 @@ export interface SoldierMesh {
   group: THREE.Group;
   /** walkPhase: rad accumulator (legs swing by sin); aimPitchRad: + = aim up. */
   setPose(walkPhase: number, aimPitchRad: number): void;
+  /** Death crumple, t: 0 (standing) → 1 (flat on the ground). Owns the whole
+   *  pose while active — the manager stops calling setPose for dead bots. */
+  setDown(t: number): void;
 }
 
 /**
@@ -262,5 +265,31 @@ export function createSoldierMesh(): SoldierMesh {
     rifle.rotation.z = Math.cos(walkPhase) * 0.02;
   };
 
-  return { group, setPose };
+  // Death fall direction — fixed per instance (render-only, so Math.random is
+  // fine) so each corpse keels over its own way.
+  const fallDir = Math.random() * Math.PI * 2;
+
+  /** Crumple: knees buckle and the torso slumps first, then the whole body
+   *  keels over pivoting at the feet. t eased so the fall accelerates. */
+  const setDown = (t: number): void => {
+    const k = Math.min(1, Math.max(0, t));
+    const e = k * k * (3 - 2 * k); // smoothstep
+    legL.rotation.x = 0;
+    legR.rotation.x = 0;
+    kneeL.rotation.x = -e * 1.1;
+    kneeR.rotation.x = -e * 1.3;
+    torso.rotation.x = -0.05 + e * 0.55; // slump forward
+    torso.rotation.y = 0;
+    torso.rotation.z = 0;
+    torso.position.y = WAIST_Y - e * 0.12;
+    armL.rotation.x = 0;
+    armR.rotation.x = 0;
+    rifle.rotation.x = 0;
+    rifle.rotation.z = 0;
+    const tip = e * (Math.PI / 2 - 0.1); // just short of perfectly flat
+    group.rotation.x = Math.cos(fallDir) * tip;
+    group.rotation.z = -Math.sin(fallDir) * tip;
+  };
+
+  return { group, setPose, setDown };
 }

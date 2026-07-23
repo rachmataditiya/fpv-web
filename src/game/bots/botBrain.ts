@@ -17,8 +17,8 @@ import * as THREE from 'three';
 import type { CollisionWorld } from '../../physics/quad';
 import { canSee, hearsNoise } from './perception';
 import { resolveBotShot } from './botFire';
-import { PLAYER_TARGET_RADIUS, TUNING } from './types';
-import type { Bot, BotCtx, BotEvent } from './types';
+import { PLAYER_TARGET_RADIUS } from './types';
+import type { Bot, BotCtx, BotEvent, BotTuning, DroneTuning, SoldierTuning } from './types';
 
 export interface BotEnv {
   world: CollisionWorld;
@@ -29,9 +29,6 @@ export interface BotEnv {
 }
 /** Back-compat alias (soldier tests / older imports). */
 export type SoldierEnv = BotEnv;
-
-const S = TUNING.soldier;
-const D = TUNING.drone;
 
 const _eye = new THREE.Vector3();
 const _muzzle = new THREE.Vector3();
@@ -123,7 +120,7 @@ function fireAt(
   ctx: BotCtx,
   env: BotEnv,
   muzzleY: number,
-  k: typeof S | typeof D,
+  k: BotTuning,
   events: BotEvent[],
 ): void {
   const targetYaw = yawToward(ctx.playerPos.x - b.pos.x, ctx.playerPos.z - b.pos.z);
@@ -150,6 +147,7 @@ function fireAt(
  *  keeps the mesh visually out of geometry — floor sampling alone lets a
  *  soldier hug a wall until its shoulders clip through. */
 function moveGround(b: Bot, tx: number, tz: number, speed: number, dt: number, env: BotEnv): boolean {
+  const S = b.tune as SoldierTuning;
   const dx = tx - b.pos.x;
   const dz = tz - b.pos.z;
   const d = Math.hypot(dx, dz);
@@ -178,6 +176,7 @@ function moveGround(b: Bot, tx: number, tz: number, speed: number, dt: number, e
 }
 
 export function stepSoldier(b: Bot, ctx: BotCtx, env: BotEnv, dt: number, events: BotEvent[]): void {
+  const S = b.tune as SoldierTuning;
   b.stateTime += dt;
   if (b.fireCooldown > 0) b.fireCooldown -= dt;
   b.vel.set(0, 0, 0); // stands unless a move succeeds this tick
@@ -285,6 +284,7 @@ export function stepSoldier(b: Bot, ctx: BotCtx, env: BotEnv, dt: number, events
  *  — never by clamping the position: a position clamp at a roof edge teleports
  *  the drone through geometry and wedges it inside forever. */
 function moveAir(b: Bot, tx: number, ty: number, tz: number, speed: number, dt: number, env: BotEnv): void {
+  const D = b.tune as DroneTuning;
   _desired.set(tx - b.pos.x, ty - b.pos.y, tz - b.pos.z);
   const d = _desired.length();
   if (d > 1e-6) _desired.multiplyScalar(Math.min(speed, d / Math.max(dt, 1e-6)) / d);
@@ -368,6 +368,7 @@ function moveAir(b: Bot, tx: number, ty: number, tz: number, speed: number, dt: 
 }
 
 export function stepDrone(b: Bot, ctx: BotCtx, env: BotEnv, dt: number, events: BotEvent[]): void {
+  const D = b.tune as DroneTuning;
   b.stateTime += dt;
   if (b.fireCooldown > 0) b.fireCooldown -= dt;
 

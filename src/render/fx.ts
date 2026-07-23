@@ -316,6 +316,12 @@ export class FxSystem {
     this.puffIdx = this.burst(this.puffSlots, this.puffIdx, pos, 0.2, 0.9, 0.4, 0.9, 0.4);
   }
 
+  /** Standalone smoke puff (drone death tumble etc.) — same pool the
+   *  explosion plumes draw from. */
+  smoke(pos: THREE.Vector3) {
+    this.smokeIdx = this.burst(this.smokeSlots, this.smokeIdx, pos, 0.4, 1.8, 0.6, 1.4, 0.55);
+  }
+
   explosion(pos: THREE.Vector3) {
     const slot = this.explosionSlots[this.explosionIdx];
     this.explosionIdx = (this.explosionIdx + 1) % this.explosionSize;

@@ -20,6 +20,93 @@ export class Sfx {
    * Play a punchy blaster: 60 ms noise burst + a sine sweep 400→120 Hz.
    */
   shoot(): void {
+    this.rifle(1, 1);
+  }
+
+  /**
+   * Enemy rifle — the player blaster pitched down and slightly quieter, so
+   * incoming fire is audibly distinct from your own.
+   */
+  botShoot(): void {
+    this.rifle(0.55, 0.85);
+  }
+
+  /**
+   * Enemy drone rotor whirr, pinged periodically while one is nearby.
+   * distance01: 0 = on top of you, 1 = at the edge of earshot.
+   */
+  droneWhirr(distance01: number): void {
+    this.ensureContext();
+    if (Sfx.disabled || !Sfx.ctx || !Sfx.masterGain) return;
+
+    const now = Sfx.ctx.currentTime;
+    if (Sfx.activeCount >= Sfx.MAX_ACTIVE) return;
+    Sfx.activeCount++;
+
+    const d = Math.min(1, Math.max(0, distance01));
+    const dur = 0.32;
+    let remainingSources = 2;
+    const onEnded = () => {
+      if (--remainingSources === 0) Sfx.activeCount--;
+    };
+
+    // prop chop: saw with a fast tremolo, closer = higher + louder
+    const osc = Sfx.ctx.createOscillator();
+    osc.type = 'sawtooth';
+    osc.frequency.setValueAtTime(150 + 90 * (1 - d), now);
+    osc.frequency.linearRampToValueAtTime(170 + 90 * (1 - d), now + dur);
+    const bp = Sfx.ctx.createBiquadFilter();
+    bp.type = 'bandpass';
+    bp.frequency.value = 480;
+    bp.Q.value = 1.2;
+    const trem = Sfx.ctx.createGain();
+    trem.gain.value = 0.55;
+    const lfo = Sfx.ctx.createOscillator();
+    lfo.type = 'square';
+    lfo.frequency.value = 27; // blade-pass wobble
+    const lfoDepth = Sfx.ctx.createGain();
+    lfoDepth.gain.value = 0.45;
+    lfo.connect(lfoDepth).connect(trem.gain);
+    const env = Sfx.ctx.createGain();
+    const peak = 0.2 * (1 - d * 0.8);
+    env.gain.setValueAtTime(0.001, now);
+    env.gain.exponentialRampToValueAtTime(Math.max(0.01, peak), now + 0.05);
+    env.gain.exponentialRampToValueAtTime(0.001, now + dur);
+    osc.connect(bp).connect(trem).connect(env).connect(Sfx.masterGain);
+    osc.start(now);
+    lfo.start(now);
+    osc.stop(now + dur);
+    lfo.stop(now + dur);
+    osc.onended = () => {
+      osc.disconnect();
+      lfo.disconnect();
+      lfoDepth.disconnect();
+      bp.disconnect();
+      trem.disconnect();
+      env.disconnect();
+      onEnded();
+    };
+
+    // motor whine on top
+    const whine = Sfx.ctx.createOscillator();
+    whine.type = 'triangle';
+    whine.frequency.setValueAtTime(880 + 320 * (1 - d), now);
+    const whineGain = Sfx.ctx.createGain();
+    whineGain.gain.setValueAtTime(0.05 * (1 - d * 0.8), now);
+    whineGain.gain.exponentialRampToValueAtTime(0.001, now + dur);
+    whine.connect(whineGain).connect(Sfx.masterGain);
+    whine.start(now);
+    whine.stop(now + dur);
+    whine.onended = () => {
+      whine.disconnect();
+      whineGain.disconnect();
+      onEnded();
+    };
+  }
+
+  /** Layered rifle report (CS-like): high-passed crack + band-passed body +
+   *  low sine thump. pitch scales all frequencies, gain the overall level. */
+  private rifle(pitch: number, gain: number): void {
     this.ensureContext();
     if (Sfx.disabled || !Sfx.ctx || !Sfx.masterGain) return;
 
@@ -33,15 +120,14 @@ export class Sfx {
       if (--remainingSources === 0) Sfx.activeCount--;
     };
 
-    // Rifle-style layered report (CS-like):
     // (1) CRACK — high-passed noise transient, very short. The "snap".
     const crack = Sfx.ctx.createBufferSource();
     crack.buffer = this.getNoiseBuffer();
     const crackHp = Sfx.ctx.createBiquadFilter();
     crackHp.type = 'highpass';
-    crackHp.frequency.value = 2200;
+    crackHp.frequency.value = 2200 * pitch;
     const crackGain = Sfx.ctx.createGain();
-    crackGain.gain.setValueAtTime(1.0, now);
+    crackGain.gain.setValueAtTime(1.0 * gain, now);
     crackGain.gain.exponentialRampToValueAtTime(0.001, now + 0.035);
     crack.connect(crackHp).connect(crackGain).connect(Sfx.masterGain);
     crack.start(now);
@@ -58,11 +144,11 @@ export class Sfx {
     body.buffer = this.getNoiseBuffer();
     const bodyBp = Sfx.ctx.createBiquadFilter();
     bodyBp.type = 'bandpass';
-    bodyBp.frequency.setValueAtTime(700, now);
-    bodyBp.frequency.exponentialRampToValueAtTime(250, now + 0.12);
+    bodyBp.frequency.setValueAtTime(700 * pitch, now);
+    bodyBp.frequency.exponentialRampToValueAtTime(250 * pitch, now + 0.12);
     bodyBp.Q.value = 0.9;
     const bodyGain = Sfx.ctx.createGain();
-    bodyGain.gain.setValueAtTime(0.55, now);
+    bodyGain.gain.setValueAtTime(0.55 * gain, now);
     bodyGain.gain.exponentialRampToValueAtTime(0.001, now + 0.14);
     body.connect(bodyBp).connect(bodyGain).connect(Sfx.masterGain);
     body.start(now);
@@ -77,10 +163,10 @@ export class Sfx {
     // (3) THUMP — low sine punch for chest feel.
     const thump = Sfx.ctx.createOscillator();
     thump.type = 'sine';
-    thump.frequency.setValueAtTime(140, now);
-    thump.frequency.exponentialRampToValueAtTime(55, now + 0.08);
+    thump.frequency.setValueAtTime(140 * pitch, now);
+    thump.frequency.exponentialRampToValueAtTime(55 * pitch, now + 0.08);
     const thumpGain = Sfx.ctx.createGain();
-    thumpGain.gain.setValueAtTime(0.5, now);
+    thumpGain.gain.setValueAtTime(0.5 * gain, now);
     thumpGain.gain.exponentialRampToValueAtTime(0.001, now + 0.09);
     thump.connect(thumpGain).connect(Sfx.masterGain);
     thump.start(now);

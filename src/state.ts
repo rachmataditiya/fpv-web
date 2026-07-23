@@ -1,6 +1,7 @@
 /** App settings — persisted to localStorage 'fpv_settings' on every change. */
 export type Quality = 'low' | 'med' | 'high';
 export type CameraMode = 'fpv' | 'chase';
+export type BotDifficulty = 'easy' | 'normal' | 'hard';
 
 export interface Settings {
   camera: CameraMode;
@@ -10,6 +11,10 @@ export interface Settings {
   quality: Quality;
   chaseStiffness: number;   // chase-cam spring ω, rad/s (8–20 playable)
   freeFly: boolean;
+  /** Enemy bots on BSP war-mode maps (applied on next map load). */
+  bots: boolean;
+  /** Bot combat difficulty (applied on next map load). */
+  botDifficulty: BotDifficulty;
   bestLapMsByTrack: Record<string, number>;
 }
 
@@ -21,6 +26,8 @@ export const DEFAULT_SETTINGS: Settings = {
   quality: 'med',
   chaseStiffness: 10,
   freeFly: false,
+  bots: true,
+  botDifficulty: 'normal',
   bestLapMsByTrack: {},
 };
 

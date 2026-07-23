@@ -119,6 +119,18 @@ const CSS = `
 .hud-dmg.on{animation:huddmg .5s ease-out}
 @keyframes huddmg{from{opacity:1}to{opacity:0}}
 
+/* ---- directional hit chevron (orbits screen center toward the shooter) ---- */
+.hud-hitdir{position:absolute;top:50%;left:50%;width:0;height:0;pointer-events:none;opacity:0}
+.hud-hitdir i{position:absolute;left:0;top:-34vmin;transform:translateX(-50%);
+  width:0;height:0;border-left:15px solid transparent;border-right:15px solid transparent;
+  border-bottom:20px solid rgba(255,60,50,.9);filter:drop-shadow(0 0 6px rgba(255,40,40,.6))}
+.hud-hitdir.on{animation:hudhit .6s ease-out}
+@keyframes hudhit{from{opacity:1}to{opacity:0}}
+
+/* ---- kills chip pop (retriggered per kill) ---- */
+.hud-score .n.pop{animation:hudpop .45s ease-out}
+@keyframes hudpop{0%{transform:scale(1)}35%{transform:scale(1.55);color:var(--fg)}100%{transform:scale(1)}}
+
 /* ---- center overlays ---- */
 .hud-count{position:absolute;top:38%;left:50%;transform:translate(-50%,-50%);
   font-size:88px;font-weight:800;color:var(--fg);display:none;
@@ -161,6 +173,7 @@ export class Hud {
   private hpNEl: HTMLSpanElement;
   private hpFillEl: HTMLDivElement;
   private dmgEl: HTMLDivElement;
+  private hitDirEl: HTMLDivElement;
 
   private prev = {
     armed: null as boolean | null,
@@ -218,6 +231,7 @@ export class Hud {
       </div>
       <div class="hud-horizon"><canvas width="220" height="220" data-r="horizon"></canvas></div>
       <div class="hud-dmg" data-r="dmg"></div>
+      <div class="hud-hitdir" data-r="hitdir"><i></i></div>
       <div class="hud-hp mono" data-r="hp">
         <div class="row"><span class="lbl">integrity</span><span class="n" data-r="hpn">100</span></div>
         <div class="track"><div class="fill" data-r="hpfill"></div></div>
@@ -250,6 +264,7 @@ export class Hud {
     this.hpNEl = $('hpn');
     this.hpFillEl = $('hpfill');
     this.dmgEl = $('dmg');
+    this.hitDirEl = $('hitdir');
     this.horizonCanvas = this.container.querySelector('[data-r="horizon"]') as HTMLCanvasElement;
     this.horizonCtx = this.horizonCanvas.getContext('2d')!;
   }
@@ -371,11 +386,27 @@ export class Hud {
   }
 
   /** Flash the red damage vignette (imperative — restarting the CSS animation
-   *  avoids threading a decay timestamp through HudData). */
-  pulseDamage(): void {
+   *  avoids threading a decay timestamp through HudData). When the shooter's
+   *  bearing relative to the camera is known, a chevron at the matching screen
+   *  edge points it out (0 = ahead, +rad = left of the camera). */
+  pulseDamage(bearingRad?: number): void {
     this.dmgEl.classList.remove('on');
     void this.dmgEl.offsetWidth; // reflow restarts the animation
     this.dmgEl.classList.add('on');
+    if (bearingRad !== undefined) {
+      // camera-relative bearing → CSS rotation (positive yaw = left = CCW)
+      this.hitDirEl.style.transform = `rotate(${(-bearingRad * 180) / Math.PI}deg)`;
+      this.hitDirEl.classList.remove('on');
+      void this.hitDirEl.offsetWidth;
+      this.hitDirEl.classList.add('on');
+    }
+  }
+
+  /** "+1" pop on the KILLS chip (retriggered per kill). */
+  pulseKill(): void {
+    this.killsNEl.classList.remove('pop');
+    void this.killsNEl.offsetWidth;
+    this.killsNEl.classList.add('pop');
   }
 
   /** Artificial horizon: translucent sky/ground rotated by −roll, pitch ladder

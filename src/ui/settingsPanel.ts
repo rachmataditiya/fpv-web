@@ -1,4 +1,4 @@
-import type { Quality, Settings } from '../state';
+import type { BotDifficulty, Quality, Settings } from '../state';
 import type { Profile } from '../input/types';
 
 export interface SettingsDeps {
@@ -9,6 +9,9 @@ export interface SettingsDeps {
     fov(deg: number): void;
     chaseStiffness(w: number): void;
     freeFly(on: boolean): void;
+    /** War-mode rows — effect on next map load; the callback just flashes. */
+    bots(on: boolean): void;
+    botDifficulty(d: BotDifficulty): void;
   };
   save(): void;
   /** Live access to the ACTIVE input device's profile (rates/expo/throttle). */
@@ -102,6 +105,12 @@ export class SettingsPanel {
     // Free-fly
     const freeFlyCheck = this.overlayEl.querySelector<HTMLInputElement>('.freefly-check');
     if (freeFlyCheck) freeFlyCheck.checked = s.freeFly;
+    // War mode
+    const botsCheck = this.overlayEl.querySelector<HTMLInputElement>('.bots-check');
+    if (botsCheck) botsCheck.checked = s.bots;
+    this.overlayEl.querySelectorAll<HTMLButtonElement>('.difficulty-btn').forEach(btn => {
+      btn.classList.toggle('active', btn.dataset.difficulty === s.botDifficulty);
+    });
 
     // Rates & throttle (active device profile)
     const active = this.deps.rates?.get() ?? null;
@@ -215,6 +224,44 @@ export class SettingsPanel {
     freeFlyLabel.prepend(freeFlyInput);
     checkboxGroup.appendChild(freeFlyLabel);
     panel.appendChild(checkboxGroup);
+
+    // ---- War mode: bots on/off + difficulty (apply on next map load) ----
+    const botsGroup = document.createElement('div');
+    botsGroup.className = 'checkbox-group';
+    const botsInput = document.createElement('input');
+    botsInput.type = 'checkbox';
+    botsInput.className = 'bots-check';
+    botsInput.addEventListener('change', () => {
+      this.deps.settings.bots = botsInput.checked;
+      this.deps.apply.bots(botsInput.checked);
+      this.deps.save();
+    });
+    const botsLabel = document.createElement('label');
+    botsLabel.textContent = 'Enemy bots (next map load)';
+    botsLabel.prepend(botsInput);
+    botsGroup.appendChild(botsLabel);
+    panel.appendChild(botsGroup);
+
+    const diffLabel = document.createElement('label');
+    diffLabel.className = 'slider-label';
+    diffLabel.textContent = 'Bot difficulty (next map load)';
+    panel.appendChild(diffLabel);
+    const diffContainer = document.createElement('div');
+    diffContainer.className = 'quality-buttons';
+    (['easy', 'normal', 'hard'] as BotDifficulty[]).forEach(d => {
+      const btn = document.createElement('button');
+      btn.classList.add('quality-btn', 'difficulty-btn');
+      btn.textContent = d.charAt(0).toUpperCase() + d.slice(1);
+      btn.dataset.difficulty = d;
+      btn.addEventListener('click', () => {
+        this.deps.settings.botDifficulty = d;
+        this.deps.apply.botDifficulty(d);
+        this.deps.save();
+        this.syncControls();
+      });
+      diffContainer.appendChild(btn);
+    });
+    panel.appendChild(diffContainer);
 
     // ---- Rates & throttle (edits the active device's profile — same data the
     // controller panel edits, so both stay in sync) ----
