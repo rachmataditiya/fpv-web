@@ -65,7 +65,8 @@ const mount = document.getElementById('app')!;
 const { renderer, scene, setQuality, resize } = createScene(mount);
 setQuality(settings.quality);
 
-const droneVisual = createDroneMesh();
+// player quad keeps the friendly orange accent — red is the enemy read
+const droneVisual = createDroneMesh({ accent: 0xff8800 });
 scene.add(droneVisual);
 let gates: GateVisuals | null = track ? createGates(track) : null;
 if (gates) scene.add(gates.group);
