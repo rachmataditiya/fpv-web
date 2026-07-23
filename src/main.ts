@@ -24,6 +24,7 @@ import { BarrelField, BARREL_BLAST_RADIUS } from './game/barrels';
 import { TargetRegistry } from './game/targetRegistry';
 import { PlayerHealth } from './game/playerHealth';
 import { BotManager, PLAYER_SHOT_DAMAGE } from './game/bots/botManager';
+import { DEFAULT_SQUAD } from './game/bots/types';
 import { ReplayRecorder, ReplayPlayer } from './game/replay';
 import type { QuadSnapshot } from './game/replay';
 import { FxSystem } from './render/fx';
@@ -130,10 +131,29 @@ const playerHealth = new PlayerHealth(100);
 let barrels: BarrelField | null = null;
 let bots: BotManager | null = null;
 /** Builds bots identical to the live set — stored by the BSP-load closure so
- *  killcam playback bots match exactly (world/bounds/spawns/counts/seed/diff). */
+ *  killcam playback bots match exactly (world/bounds/spawns/squad/seed/diff). */
 let makeBots: (() => BotManager) | null = null;
 const fx = new FxSystem(scene);
 const sfx = new Sfx();
+
+// heavy-rocket visuals — additive sprites synced to whichever bot manager is
+// on screen (live, or the killcam playback manager)
+const rocketSprites: THREE.Sprite[] = [];
+for (let i = 0; i < 8; i++) {
+  const s = new THREE.Sprite(
+    new THREE.SpriteMaterial({
+      color: 0xff5522,
+      blending: THREE.AdditiveBlending,
+      transparent: true,
+      opacity: 0.9,
+      depthWrite: false,
+    }),
+  );
+  s.scale.setScalar(0.35);
+  s.visible = false;
+  scene.add(s);
+  rocketSprites.push(s);
+}
 
 // replay recording (Wave 2): inputs + full-state snapshots every sim tick —
 // the sim is deterministic from (snapshot + input stream), so this is all the
@@ -268,6 +288,32 @@ function endKillcam(): void {
   flash('YOU DIED', 900);
 }
 
+/** Lethal damage to the player (bot shot or heavy-rocket blast): crash +
+ *  death cam. killerIdx < 0 (blasts) skips the killer-POV killcam. */
+function killPlayer(killerIdx: number): void {
+  quad.crashed = true;
+  quad.crashTimer = params.respawnDelay;
+  quad.vel.set(0, 0, 0);
+  quad.thrust = 0;
+  flash('YOU DIED');
+  recorder.logEvent('player-died', [quad.pos.x, quad.pos.y, quad.pos.z]);
+  if (killerIdx >= 0) startKillcam(killerIdx);
+}
+
+/** A barrel went boom at pos (player shot or blast chain reaction): FX + the
+ *  too-close crash check. */
+function onBarrelBoom(pos: THREE.Vector3): void {
+  fx.explosion(pos);
+  sfx.explode();
+  if (quad.pos.distanceTo(pos) < BARREL_BLAST_RADIUS) {
+    quad.crashed = true;
+    quad.crashTimer = params.respawnDelay;
+    quad.vel.set(0, 0, 0);
+    quad.thrust = 0;
+    flash('CAUGHT IN THE BLAST!');
+  }
+}
+
 function restartRace(): void {
   if (!race) {
     // war mode with a track waiting → the restart button STARTS the race
@@ -325,20 +371,13 @@ if (bspName) {
         get targets() { return bf.targets; },
         onHit: (i) => {
           const boomAt = bf.explode(i);
-          fx.explosion(boomAt);
-          sfx.explode();
           flash(`BARREL ${bf.score}`, 700);
-          if (quad.pos.distanceTo(boomAt) < BARREL_BLAST_RADIUS) {
-            quad.crashed = true;
-            quad.crashTimer = params.respawnDelay;
-            quad.vel.set(0, 0, 0);
-            quad.thrust = 0;
-            flash('CAUGHT IN THE BLAST!');
-          }
+          onBarrelBoom(boomAt);
         },
       });
 
-      // enemy bots (war mode): 2 drones + 3 soldiers, spawned on real floors
+      // enemy bots (war mode): the 5-bot squad (rifle/sniper/heavy soldiers +
+      // scout/rifle drones), spawned on real floors
       if (settings.bots) {
         // factory preserved for killcam playback bots (identical construction)
         const botDifficulty = settings.botDifficulty;
@@ -349,7 +388,7 @@ if (bspName) {
             spawnCheckpoint.pos,
             world.geometryFloorAt,
             bsp.spawns.slice(1), // the map's unused player spawns make natural bot posts
-            { drones: 2, soldiers: 3 },
+            DEFAULT_SQUAD,
             4242,
             { difficulty: botDifficulty, fx },
           );
@@ -716,6 +755,7 @@ const hooks = {
       if (shot.hitWorld) fx.impact(shot.to);
       sfx.shoot();
       if (shot.targetIndex !== null) targetRegistry.dispatchHit(shot.targetIndex);
+      bots?.suppressNear(shot.from, shot.to); // near misses rattle soldiers' aim
     }
     barrels?.tick(dt);
     if (bots) {
@@ -728,7 +768,25 @@ const hooks = {
         playerNoise: !!shot,
       });
       for (const ev of botEvents) {
-        if (ev.type !== 'bot-shot') continue;
+        if (ev.type === 'projectile-blast') {
+          // heavy rocket went off: FX, player splash, barrel chain reactions
+          fx.explosion(ev.pos);
+          sfx.explode();
+          if (!quad.crashed && quad.pos.distanceTo(ev.pos) < 4) {
+            if (playerHealth.damage(ev.damage)) killPlayer(-1);
+          }
+          for (const boomPos of barrels?.blastNear(ev.pos, 4) ?? []) onBarrelBoom(boomPos);
+          continue;
+        }
+        if (ev.type === 'bot-died') {
+          // blast friendly fire — no kill credit, but the body still drops
+          recorder.logEvent('bot-died', [ev.pos.x, ev.pos.y, ev.pos.z]);
+          fx.explosion(ev.pos);
+          sfx.explode();
+          flash(`${ev.kind === 'drone' ? 'DRONE' : 'SOLDIER'} DOWN`, 900);
+          continue;
+        }
+        if (ev.type !== 'bot-shot') continue; // bot-mark: squad-internal
         recorder.logEvent('bot-shot', [ev.from.x, ev.from.y, ev.from.z, ev.to.x, ev.to.y, ev.to.z, ev.hitPlayer ? 1 : 0]);
         fx.tracer(ev.from, ev.to);
         fx.muzzle(ev.from);
@@ -738,15 +796,7 @@ const hooks = {
           _hitEuler.setFromQuaternion(quad.q, 'YXZ');
           const sy = Math.atan2(-(ev.from.x - quad.pos.x), -(ev.from.z - quad.pos.z));
           hud.pulseDamage(Math.atan2(Math.sin(sy - _hitEuler.y), Math.cos(sy - _hitEuler.y)));
-          if (playerHealth.damage(ev.damage)) {
-            quad.crashed = true;
-            quad.crashTimer = params.respawnDelay;
-            quad.vel.set(0, 0, 0);
-            quad.thrust = 0;
-            flash('YOU DIED');
-            recorder.logEvent('player-died', [quad.pos.x, quad.pos.y, quad.pos.z]);
-            startKillcam(bots.targets.indexOf(ev.shooter));
-          }
+          if (playerHealth.damage(ev.damage)) killPlayer(bots.targets.indexOf(ev.shooter));
         }
       }
       // enemy rotor whirr — a ping every ~2s of sim time while a drone is near
@@ -792,6 +842,20 @@ const hooks = {
       rig.update(frameDt);
       fx.update(frameDt);
       bots?.updateVisuals(frameDt, renderPos);
+    }
+
+    // heavy-rocket sprites follow whichever bot manager is on screen (during
+    // killcam the live bots are hidden — the playback manager owns the pool)
+    const shownBots = killcam ? killcam.player.bots : bots;
+    const projs = shownBots?.projectiles.list;
+    for (let i = 0; i < rocketSprites.length; i++) {
+      const p = projs?.[i];
+      if (p?.alive) {
+        rocketSprites[i].position.copy(p.pos);
+        rocketSprites[i].visible = true;
+      } else {
+        rocketSprites[i].visible = false;
+      }
     }
 
     // HUD (attitude from render quaternion; YXZ = yaw→pitch→roll order)

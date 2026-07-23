@@ -199,7 +199,15 @@ function cloneSnapshot(s: Snapshot): Snapshot {
     },
     hp: s.hp,
     weapon: { ...s.weapon },
-    bots: s.bots ? { kills: s.bots.kills, rngState: s.bots.rngState, bots: s.bots.bots.map((r) => [...r]) } : null,
+    bots: s.bots
+      ? {
+          kills: s.bots.kills,
+          rngState: s.bots.rngState,
+          bots: s.bots.bots.map((r) => [...r]),
+          mark: [...s.bots.mark],
+          projs: s.bots.projs.map((r) => [...r]),
+        }
+      : null,
   };
 }
 
@@ -223,7 +231,7 @@ export interface ReplayConfig {
   /** FPV camera uptilt — the weapon aims along the camera, not body-forward. */
   uptiltDeg: number;
   /** Constructs playback bots with EXACTLY the live ctor args (same world/
-   *  bounds/avoid/strictFloor/extraSpawns/counts/seed/difficulty). */
+   *  bounds/avoid/strictFloor/extraSpawns/squad/seed/difficulty). */
   makeBots: (() => BotManager) | null;
   fx: FxSystem | null;
 }

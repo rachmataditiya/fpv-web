@@ -40,3 +40,18 @@ export function canSee(
 export function hearsNoise(pos: THREE.Vector3, noiseAt: THREE.Vector3, range: number): boolean {
   return pos.distanceToSquared(noiseAt) <= range * range;
 }
+
+/** Distance from point `p` to the segment a→b (suppression pass-by test). */
+export function distToSegment(p: THREE.Vector3, a: THREE.Vector3, b: THREE.Vector3): number {
+  const abx = b.x - a.x, aby = b.y - a.y, abz = b.z - a.z;
+  const lenSq = abx * abx + aby * aby + abz * abz;
+  let t = 0;
+  if (lenSq > 1e-12) {
+    t = ((p.x - a.x) * abx + (p.y - a.y) * aby + (p.z - a.z) * abz) / lenSq;
+    t = Math.max(0, Math.min(1, t));
+  }
+  const dx = p.x - (a.x + abx * t);
+  const dy = p.y - (a.y + aby * t);
+  const dz = p.z - (a.z + abz * t);
+  return Math.sqrt(dx * dx + dy * dy + dz * dz);
+}

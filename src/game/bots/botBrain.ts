@@ -16,7 +16,7 @@
 import * as THREE from 'three';
 import type { CollisionWorld } from '../../physics/quad';
 import { canSee, hearsNoise } from './perception';
-import { resolveBotShot } from './botFire';
+import { aimError, resolveBotShot } from './botFire';
 import { PLAYER_TARGET_RADIUS } from './types';
 import type { Bot, BotCtx, BotEvent, BotTuning, DroneTuning, SoldierTuning } from './types';
 
@@ -26,12 +26,15 @@ export interface BotEnv {
   floorAt(x: number, z: number): number | null;
   /** Fresh patrol waypoint on valid geometry (manager-seeded sampling). */
   sampleWaypoint(): { x: number; y: number; z: number } | null;
+  /** Launch a slow projectile (heavy class) — manager wires its pool here. */
+  spawnProjectile?(from: THREE.Vector3, dir: THREE.Vector3, speed: number, spreadRad: number, rng: () => number): void;
 }
 /** Back-compat alias (soldier tests / older imports). */
 export type SoldierEnv = BotEnv;
 
 const _eye = new THREE.Vector3();
 const _muzzle = new THREE.Vector3();
+const _aimDir = new THREE.Vector3();
 const _desired = new THREE.Vector3();
 const _dv = new THREE.Vector3();
 const _next = new THREE.Vector3();
@@ -121,16 +124,42 @@ function fireAt(
   env: BotEnv,
   muzzleY: number,
   k: BotTuning,
+  dt: number,
   events: BotEvent[],
 ): void {
+  if (k.noFire) return; // scout: spotter only, never fires
+  // sniper telegraph: the charge window must elapse before every shot
+  if (k.chargeS > 0 && b.chargeLeft > 0) {
+    b.chargeLeft -= dt;
+    return;
+  }
   const targetYaw = yawToward(ctx.playerPos.x - b.pos.x, ctx.playerPos.z - b.pos.z);
   if (Math.abs(yawErrTo(b.yaw, targetYaw)) >= k.fireConeRad || b.fireCooldown > 0) return;
   _muzzle.set(b.pos.x, muzzleY, b.pos.z);
-  const shot = resolveBotShot(
-    _muzzle, ctx.playerPos, ctx.playerVel.length(), PLAYER_TARGET_RADIUS,
-    b.trackTime, env.world, b.rng, k,
-  );
-  events.push({ type: 'bot-shot', from: _muzzle.clone(), to: shot.to, hitPlayer: shot.hitPlayer, damage: k.damage, shooter: b });
+  // suppressed bots shoot through a ×1.5 aim cone (preallocated tune copy)
+  const eff = b.suppressLeft > 0 ? b.tuneSuppressed : k;
+  if (k.projectileSpeed > 0 && env.spawnProjectile) {
+    // heavy: dodgeable rocket instead of hitscan — the short bot-shot event
+    // below is muzzle FX only (no hit, no damage; the blast does the work)
+    _aimDir.subVectors(ctx.playerPos, _muzzle);
+    const dist = _aimDir.length();
+    _aimDir.normalize();
+    env.spawnProjectile(_muzzle, _aimDir, k.projectileSpeed, aimError(eff, b.trackTime, dist, ctx.playerVel.length()), b.rng);
+    events.push({
+      type: 'bot-shot',
+      from: _muzzle.clone(),
+      to: _muzzle.clone().addScaledVector(_aimDir, 2),
+      hitPlayer: false,
+      damage: 0,
+      shooter: b,
+    });
+  } else {
+    const shot = resolveBotShot(
+      _muzzle, ctx.playerPos, ctx.playerVel.length(), PLAYER_TARGET_RADIUS,
+      b.trackTime, env.world, b.rng, eff,
+    );
+    events.push({ type: 'bot-shot', from: _muzzle.clone(), to: shot.to, hitPlayer: shot.hitPlayer, damage: k.damage, shooter: b });
+  }
   b.burstLeft--;
   if (b.burstLeft <= 0) {
     b.burstLeft = k.burstCount;
@@ -138,6 +167,7 @@ function fireAt(
   } else {
     b.fireCooldown = k.burstInterval;
   }
+  if (k.chargeS > 0) b.chargeLeft = k.chargeS; // re-arm the telegraph
 }
 
 // ---------------------------------------------------------------- soldier ---
@@ -179,6 +209,7 @@ export function stepSoldier(b: Bot, ctx: BotCtx, env: BotEnv, dt: number, events
   const S = b.tune as SoldierTuning;
   b.stateTime += dt;
   if (b.fireCooldown > 0) b.fireCooldown -= dt;
+  if (b.suppressLeft > 0) b.suppressLeft = Math.max(0, b.suppressLeft - dt);
   b.vel.set(0, 0, 0); // stands unless a move succeeds this tick
 
   const feetY = b.pos.y - S.height / 2;
@@ -223,6 +254,7 @@ export function stepSoldier(b: Bot, ctx: BotCtx, env: BotEnv, dt: number, events
           setState(b, 'engage');
           b.burstLeft = S.burstCount;
           b.fireCooldown = 0;
+          if (S.chargeS > 0) b.chargeLeft = S.chargeS; // telegraph before the first shot
         }
       } else if (hears) {
         b.stateTime = 0; // fresh stimulus keeps us alert
@@ -246,7 +278,7 @@ export function stepSoldier(b: Bot, ctx: BotCtx, env: BotEnv, dt: number, events
       const fz = -Math.cos(b.yaw);
       moveGround(b, b.pos.x - fz * strafeSign * 2, b.pos.z + fx * strafeSign * 2, S.strafeSpeed, dt, env);
 
-      fireAt(b, ctx, env, feetY + S.muzzleHeight, S, events);
+      fireAt(b, ctx, env, feetY + S.muzzleHeight, S, dt, events);
       break;
     }
 
@@ -371,8 +403,13 @@ export function stepDrone(b: Bot, ctx: BotCtx, env: BotEnv, dt: number, events: 
   const D = b.tune as DroneTuning;
   b.stateTime += dt;
   if (b.fireCooldown > 0) b.fireCooldown -= dt;
+  if (b.suppressLeft > 0) b.suppressLeft = Math.max(0, b.suppressLeft - dt);
 
   const { sees, hears } = updateSenses(b, ctx, env, dt, b.pos.y, D);
+  // scout shared intel: paint the player's position for the whole squad
+  if (sees && b.botClass === 'scout') {
+    events.push({ type: 'bot-mark', pos: ctx.playerPos.clone(), from: b.pos.clone() });
+  }
 
   switch (b.state) {
     case 'patrol': {
@@ -411,6 +448,7 @@ export function stepDrone(b: Bot, ctx: BotCtx, env: BotEnv, dt: number, events: 
           setState(b, 'engage');
           b.burstLeft = D.burstCount;
           b.fireCooldown = 0;
+          if (D.chargeS > 0) b.chargeLeft = D.chargeS;
         }
       } else if (hears) {
         b.stateTime = 0;
@@ -443,7 +481,7 @@ export function stepDrone(b: Bot, ctx: BotCtx, env: BotEnv, dt: number, events: 
         moveAir(b, b.pos.x + (-dz / horiz) * 6 * sign, p.y + 2, b.pos.z + (dx / horiz) * 6 * sign, D.patrolSpeed, dt, env);
       }
 
-      fireAt(b, ctx, env, b.pos.y, D, events);
+      fireAt(b, ctx, env, b.pos.y, D, dt, events);
       break;
     }
 

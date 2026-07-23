@@ -36,12 +36,16 @@ function env(world: CollisionWorld = openWorld, over: Partial<BotEnv> = {}): Bot
 function soldier(x = 0, z = 0, yaw = 0, seed = 7): Bot {
   return {
     kind: 'soldier',
+    botClass: 'rifleman',
     pos: new THREE.Vector3(x, S.height / 2, z),
     radius: S.hitRadius,
     alive: true,
     hp: S.hp,
     state: 'patrol',
     tune: { ...S },
+    tuneSuppressed: { ...S },
+    chargeLeft: 0,
+    suppressLeft: 0,
     vel: new THREE.Vector3(),
     yaw,
     respawnIn: 0,

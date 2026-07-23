@@ -4,7 +4,7 @@ import * as THREE from 'three';
 import { applyDifficulty } from '../difficulty';
 import { BotManager } from '../botManager';
 import { TUNING } from '../types';
-import type { Bot } from '../types';
+import type { Bot, SquadMember } from '../types';
 import type { CollisionWorld } from '../../../physics/quad';
 
 const flatWorld: CollisionWorld = { floorAt: () => 0 };
@@ -61,15 +61,19 @@ describe('applyDifficulty', () => {
   });
 
   it('BotManager snapshots difficulty into each bot at construction', () => {
-    const hard = new BotManager(flatWorld, BOUNDS, AVOID, null, [], { drones: 1, soldiers: 1 }, 4242, { difficulty: 'hard' });
-    const easy = new BotManager(flatWorld, BOUNDS, AVOID, null, [], { drones: 1, soldiers: 1 }, 4242, { difficulty: 'easy' });
-    const hardDrone = hard.targets[0] as Bot;
+    const squad: SquadMember[] = [
+      { kind: 'drone', cls: 'rifleman' },
+      { kind: 'soldier', cls: 'rifleman' },
+    ];
+    const hard = new BotManager(flatWorld, BOUNDS, AVOID, null, [], squad, 4242, { difficulty: 'hard' });
+    const easy = new BotManager(flatWorld, BOUNDS, AVOID, null, [], squad, 4242, { difficulty: 'easy' });
+    const hardDrone = hard.targets[0] as Bot; // squad order: drone first
     const easyDrone = easy.targets[0] as Bot;
     expect(hardDrone.tune.damage).toBeCloseTo(TUNING.drone.damage * 1.3);
     expect(easyDrone.tune.damage).toBeCloseTo(TUNING.drone.damage * 0.7);
     expect(hardDrone.tune.reactionS).toBeLessThan(easyDrone.tune.reactionS);
     // normal (default) matches base tuning
-    const normal = new BotManager(flatWorld, BOUNDS, AVOID, null, [], { drones: 1, soldiers: 0 });
+    const normal = new BotManager(flatWorld, BOUNDS, AVOID, null, [], [{ kind: 'drone', cls: 'rifleman' }]);
     expect((normal.targets[0] as Bot).tune.damage).toBeCloseTo(TUNING.drone.damage);
   });
 });

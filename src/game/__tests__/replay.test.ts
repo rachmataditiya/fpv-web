@@ -117,7 +117,11 @@ describe('replay round-trip (quad only)', () => {
 });
 
 describe('replay with bots (rng-state restore fidelity)', () => {
-  const mkBots = () => new BotManager(flatWorld, BOUNDS, AVOID, null, [], { drones: 1, soldiers: 1 }, 4242);
+  const mkBots = () =>
+    new BotManager(flatWorld, BOUNDS, AVOID, null, [], [
+      { kind: 'drone', cls: 'rifleman' },
+      { kind: 'soldier', cls: 'rifleman' },
+    ], 4242);
 
   function runLive(): { quad: QuadState; bots: BotManager; cp: { pos: THREE.Vector3; yawDeg: number }; data: ReturnType<ReplayRecorder['data']>; shots: number } {
     const bots = mkBots();

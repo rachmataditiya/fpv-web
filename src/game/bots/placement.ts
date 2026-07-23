@@ -23,6 +23,9 @@ export interface PlacementSpec {
   footRadius: number;
   /** Required clear height above the floor. */
   clearance: number;
+  /** Snipers: keep sampling (up to 6 valid candidates) and take the highest
+   *  floor y — perches over pits. Deterministic via the same rng stream. */
+  preferHigh?: boolean;
   rng: () => number;
 }
 
@@ -37,6 +40,8 @@ export function samplePoint(spec: PlacementSpec, tries = 24): PlacedPoint | null
   const { world, bounds, strictFloor, avoid, avoidRadius, others, minSeparation, footRadius, clearance, rng } = spec;
   const floor = (x: number, z: number) =>
     strictFloor ? strictFloor(x, z) : world.floorAt(x, 200, z);
+  let best: PlacedPoint | null = null;
+  let found = 0;
   for (let t = 0; t < tries; t++) {
     const x = bounds.minX + rng() * (bounds.maxX - bounds.minX);
     const z = bounds.minZ + rng() * (bounds.maxZ - bounds.minZ);
@@ -61,7 +66,9 @@ export function samplePoint(spec: PlacementSpec, tries = 24): PlacedPoint | null
       _sweepB.set(x, y + clearance, z);
       if (world.sweep(_sweepA, _sweepB)) continue; // ceiling too low / inside solid
     }
-    return { x, y, z };
+    if (!spec.preferHigh) return { x, y, z };
+    if (best === null || y > best.y) best = { x, y, z };
+    if (++found >= 6) break; // enough candidates — take the highest
   }
-  return null;
+  return best;
 }

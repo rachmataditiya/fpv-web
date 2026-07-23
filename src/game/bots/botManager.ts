@@ -1,7 +1,7 @@
-/** Enemy bot orchestrator — owns the bot list, their meshes, spawning and
- *  respawn timers, and drives each bot's brain from the physics tick.
- *  Soldiers run the full patrol/alert/engage/seek machine (botBrain); drones
- *  are still hovering dummies until B1.6.
+/** Enemy bot orchestrator — owns the squad (default: rifleman/sniper/heavy
+ *  soldiers + scout/rifleman drones), their meshes, spawning and respawn
+ *  timers, the heavy's projectile pool, squad alert + scout shared intel, and
+ *  drives each bot's brain from the physics tick.
  *
  *  Sim/render split: tick() runs at 240 Hz from simTick and never touches
  *  meshes except through placeAt (like BarrelField); updateVisuals() runs from
@@ -20,8 +20,10 @@ import { samplePoint } from './placement';
 import { stepDrone, stepSoldier } from './botBrain';
 import type { BotEnv } from './botBrain';
 import { applyDifficulty } from './difficulty';
-import { PLAYER_SHOT_DAMAGE, TUNING } from './types';
-import type { Bot, BotAiState, BotCtx, BotDiedEvent, BotEvent, BotKind, DroneTuning, SoldierTuning } from './types';
+import { distToSegment } from './perception';
+import { ProjectilePool } from '../projectiles';
+import { CLASS_TUNING, DEFAULT_SQUAD, PLAYER_SHOT_DAMAGE, PLAYER_TARGET_RADIUS, TUNING } from './types';
+import type { Bot, BotAiState, BotClass, BotCtx, BotDiedEvent, BotEvent, BotTuning, DroneTuning, SoldierTuning, SquadMember } from './types';
 
 export { PLAYER_SHOT_DAMAGE };
 
@@ -45,15 +47,28 @@ export { PLAYER_SHOT_DAMAGE };
  *  [22..24] lastKnown xyz
  *  [25] walkPhase
  *  [26] respawnIn
- *  [27] rngState     bot stream position before the next draw */
+ *  [27] rngState     bot stream position before the next draw
+ *  [28] classIdx     0=rifleman, 1=sniper, 2=heavy, 3=scout
+ *  [29] chargeLeft
+ *  [30] suppressLeft
+ *  Squad intel lives on the manager (mark row below) — tune/tuneSuppressed are
+ *  construction-derived and intentionally NOT snapshotted. */
 export interface BotsSnapshot {
   kills: number;
   rngState: number;
   bots: number[][];
+  /** [simTime, markUntil, markedPos xyz, markFrom xyz] — scout shared intel,
+   *  carried so a mid-mark snapshot restores bit-exact squad behavior. */
+  mark: number[];
+  /** Projectile pool slots: [alive, pos xyz, vel xyz, ttl] each — a heavy's
+   *  rocket in flight across a snapshot must survive the restore too. */
+  projs: number[][];
 }
 
 const STATE_IDX: Record<BotAiState, number> = { patrol: 0, alert: 1, engage: 2, seek: 3, dead: 4 };
 const STATE_BY_IDX: readonly BotAiState[] = ['patrol', 'alert', 'engage', 'seek', 'dead'];
+const CLASS_IDX: Record<BotClass, number> = { rifleman: 0, sniper: 1, heavy: 2, scout: 3 };
+const CLASS_BY_IDX: readonly BotClass[] = ['rifleman', 'sniper', 'heavy', 'scout'];
 
 /** Bots never (re)spawn closer to the player spawn than this. */
 const SPAWN_CLEARANCE = 20;
@@ -63,6 +78,17 @@ const WAYPOINT_CLEARANCE = 8;
 /** Death anim durations (render-side; respawn timing is untouched). */
 const SOLDIER_CRUMPLE_S = 0.7;
 const DRONE_TUMBLE_S = 0.8;
+/** Squad alert radius: a teammate engaging wakes patrolling bots this close. */
+const SQUAD_ALERT_RADIUS = 25;
+/** Scout intel: who gets alerted (from the mark origin) and for how long. */
+const MARK_ALERT_RADIUS = 40;
+const MARK_DURATION_S = 3;
+/** Suppression window from a player shot passing close by. */
+const SUPPRESS_RADIUS = 2;
+const SUPPRESS_S = 1.5;
+/** Heavy rocket blast damage — fixed, matches CLASS_TUNING.heavy.damage
+ *  (difficulty scaling applies to the tune, the blast const stays simple). */
+const HEAVY_BLAST_DAMAGE = 22;
 
 const _right = new THREE.Vector3();
 const _fwd = new THREE.Vector3();
@@ -84,6 +110,8 @@ interface DeathAnim {
 
 export class BotManager {
   readonly group = new THREE.Group();
+  /** The heavy squad member's rockets — sim-side pool, render reads list. */
+  readonly projectiles: ProjectilePool;
   kills = 0;
   /** Track editor open etc. — AI goes idle (respawn timers keep running). */
   passive = false;
@@ -94,7 +122,8 @@ export class BotManager {
   /** Parallel to bots: soldier crumple driver (null for drones). */
   private downers: (((t: number) => void) | null)[] = [];
   private deathAnims: (DeathAnim | null)[] = [];
-  private tuning: { drone: DroneTuning; soldier: SoldierTuning };
+  /** Sniper aim telegraphs — thin red laser from muzzle to player. */
+  private lasers: THREE.Line[] = [];
   private fx: FxSystem | null;
   private rng: StatefulRng;
   private world: CollisionWorld;
@@ -103,6 +132,12 @@ export class BotManager {
   private strictFloor: ((x: number, z: number) => number | null) | null;
   private env: BotEnv;
   private events: BotEvent[] = [];
+  /** Sim clock (s) — scout intel windows key off this. */
+  private simTime = 0;
+  /** Active scout mark: squad converges on markedPos until markUntil. */
+  private markUntil = 0;
+  private markedPos = new THREE.Vector3();
+  private markFrom = new THREE.Vector3();
 
   /** extraSpawns: the map's unused info_player_* points (bsp.spawns[1..]) —
    *  consumed for initial placement before falling back to sampling. */
@@ -112,7 +147,7 @@ export class BotManager {
     avoid: THREE.Vector3,
     strictFloor: ((x: number, z: number) => number | null) | null = null,
     extraSpawns: { pos: [number, number, number]; yawDeg: number }[] = [],
-    counts: { drones: number; soldiers: number } = { drones: 2, soldiers: 3 },
+    squad: SquadMember[] = DEFAULT_SQUAD,
     seed = 4242,
     opts: { difficulty?: BotDifficulty; fx?: FxSystem | null } = {},
   ) {
@@ -121,10 +156,8 @@ export class BotManager {
     this.avoid = avoid.clone();
     this.strictFloor = strictFloor;
     this.fx = opts.fx ?? null;
-    this.tuning = {
-      drone: applyDifficulty(TUNING.drone, opts.difficulty ?? 'normal'),
-      soldier: applyDifficulty(TUNING.soldier, opts.difficulty ?? 'normal'),
-    };
+    const difficulty = opts.difficulty ?? 'normal';
+    this.projectiles = new ProjectilePool(world);
     this.rng = mulberry32Stateful(seed);
     this.group.name = 'bots';
     this.env = {
@@ -156,11 +189,41 @@ export class BotManager {
           clearance: SOLDIER_HEIGHT + 0.4,
           rng: this.rng,
         }),
+      spawnProjectile: (from, dir, speed, spreadRad, rng) =>
+        this.projectiles.spawn(from, dir, speed, spreadRad, rng),
     };
 
+    // sniper telegraph lasers (render-side; updateVisuals drives them)
+    for (let i = 0; i < 4; i++) {
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(6), 3));
+      const line = new THREE.Line(
+        geo,
+        new THREE.LineBasicMaterial({
+          color: 0xff2020,
+          blending: THREE.AdditiveBlending,
+          transparent: true,
+          opacity: 0.7,
+        }),
+      );
+      line.visible = false;
+      line.frustumCulled = false; // endpoints move every frame
+      this.group.add(line);
+      this.lasers.push(line);
+    }
+
     const fixedSpawns = [...extraSpawns];
-    const make = (kind: BotKind, index: number): void => {
-      const tune = this.tuning[kind];
+    const make = (member: SquadMember, index: number): void => {
+      const kind = member.kind;
+      // class tuning: rifleman = the kind base block, others = CLASS_TUNING
+      const base = member.cls === 'rifleman' ? TUNING[kind] : CLASS_TUNING[member.cls];
+      const tune: BotTuning = applyDifficulty(base, difficulty);
+      // preallocated suppression copy — the same tune with a ×1.5 aim cone
+      const tuneSuppressed: BotTuning = { ...tune };
+      tuneSuppressed.aimErrBase = tune.aimErrBase * 1.5;
+      tuneSuppressed.aimErrMin = tune.aimErrMin * 1.5;
+      tuneSuppressed.aimErrPerMeter = tune.aimErrPerMeter * 1.5;
+      tuneSuppressed.aimErrPerSpeed = tune.aimErrPerSpeed * 1.5;
       let mesh: THREE.Group;
       let poser: ((walkPhase: number, aimPitch: number) => void) | null = null;
       let downer: ((t: number) => void) | null = null;
@@ -175,12 +238,16 @@ export class BotManager {
       }
       const b: Bot = {
         kind,
+        botClass: member.cls,
         pos: new THREE.Vector3(),
         radius: tune.hitRadius,
         alive: false,
         hp: tune.hp,
         state: 'patrol',
         tune,
+        tuneSuppressed,
+        chargeLeft: 0,
+        suppressLeft: 0,
         vel: new THREE.Vector3(),
         yaw: 0,
         respawnIn: 0,
@@ -204,9 +271,7 @@ export class BotManager {
       this.deathAnims.push(null);
       this.place(b, fixedSpawns);
     };
-    let idx = 0;
-    for (let i = 0; i < counts.drones; i++) make('drone', idx++);
-    for (let i = 0; i < counts.soldiers; i++) make('soldier', idx++);
+    squad.forEach((member, i) => make(member, i));
   }
 
   get targets(): readonly ShotTarget[] {
@@ -225,10 +290,31 @@ export class BotManager {
     if (!b.alive) return null;
     b.hp -= damage;
     if (b.hp > 0) return null;
+    this.kills++;
+    return this.killBot(i);
+  }
+
+  /** Blast damage to every living bot within `radius` of `pos` (heavy rocket
+   *  friendly fire — enemy-inflicted, so NO kills++). Returns the deaths. */
+  areaDamage(pos: THREE.Vector3, radius: number, damage: number): BotDiedEvent[] {
+    const died: BotDiedEvent[] = [];
+    for (let i = 0; i < this.bots.length; i++) {
+      const b = this.bots[i];
+      if (!b.alive || b.pos.distanceTo(pos) > radius) continue;
+      b.hp -= damage;
+      if (b.hp > 0) continue;
+      died.push(this.killBot(i));
+    }
+    return died;
+  }
+
+  /** Shared death path (hit + areaDamage): state, respawn timer, death anim,
+   *  and the one-time event. Scorekeeping (kills++) is the caller's job. */
+  private killBot(i: number): BotDiedEvent {
+    const b = this.bots[i];
     b.alive = false;
     b.state = 'dead';
     b.respawnIn = b.tune.respawnS;
-    this.kills++;
     this.deathAnims[i] = {
       t: 0,
       from: b.pos.clone(),
@@ -239,6 +325,15 @@ export class BotManager {
       smoked: 0,
     };
     return { type: 'bot-died', kind: b.kind, pos: b.pos };
+  }
+
+  /** Player shot segment (from→to) just resolved — soldiers it passed within
+   *  SUPPRESS_RADIUS of get suppression: a ×1.5 aim cone for SUPPRESS_S. */
+  suppressNear(from: THREE.Vector3, to: THREE.Vector3): void {
+    for (const b of this.bots) {
+      if (!b.alive || b.kind !== 'soldier') continue;
+      if (distToSegment(b.pos, from, to) <= SUPPRESS_RADIUS) b.suppressLeft = SUPPRESS_S;
+    }
   }
 
   /** Full sim-state snapshot (see BotsSnapshot for the row layout) — replay
@@ -268,17 +363,44 @@ export class BotManager {
         b.walkPhase,
         b.respawnIn,
         b.rng.getState(),
+        CLASS_IDX[b.botClass],
+        b.chargeLeft,
+        b.suppressLeft,
+      ]),
+      mark: [
+        this.simTime,
+        this.markUntil,
+        this.markedPos.x, this.markedPos.y, this.markedPos.z,
+        this.markFrom.x, this.markFrom.y, this.markFrom.z,
+      ],
+      projs: this.projectiles.list.map((p) => [
+        p.alive ? 1 : 0,
+        p.pos.x, p.pos.y, p.pos.z,
+        p.vel.x, p.vel.y, p.vel.z,
+        p.ttl,
       ]),
     };
   }
 
   /** Overwrite all sim state from a snapshot. Precondition: this manager was
-   *  constructed with the same counts + seed as the snapshotted one (same bot
+   *  constructed with the same squad + seed as the snapshotted one (same bot
    *  count/order). Draws NOTHING from any rng — construction-time draws are
    *  fully overwritten, including every stream's state. */
   restore(s: BotsSnapshot): void {
     this.kills = s.kills;
     this.rng.setState(s.rngState);
+    this.simTime = s.mark[0];
+    this.markUntil = s.mark[1];
+    this.markedPos.set(s.mark[2], s.mark[3], s.mark[4]);
+    this.markFrom.set(s.mark[5], s.mark[6], s.mark[7]);
+    for (let i = 0; i < this.projectiles.list.length; i++) {
+      const p = this.projectiles.list[i];
+      const r = s.projs[i];
+      p.alive = r[0] !== 0;
+      p.pos.set(r[1], r[2], r[3]);
+      p.vel.set(r[4], r[5], r[6]);
+      p.ttl = r[7];
+    }
     for (let i = 0; i < this.bots.length; i++) {
       const b = this.bots[i];
       const r = s.bots[i];
@@ -307,6 +429,9 @@ export class BotManager {
       b.walkPhase = r[25];
       b.respawnIn = r[26];
       b.rng.setState(r[27]);
+      b.botClass = CLASS_BY_IDX[r[28]] ?? 'rifleman';
+      b.chargeLeft = r[29];
+      b.suppressLeft = r[30];
       // render-side cleanup: no dying meshes carried over from construction
       this.deathAnims[i] = null;
       this.downers[i]?.(0); // stand soldier meshes back up
@@ -326,10 +451,11 @@ export class BotManager {
     return best;
   }
 
-  /** AI + respawn timers. Call once per physics tick; returned events are
-   *  valid until the next tick() (the array is reused). */
+  /** AI + respawn timers + projectiles. Call once per physics tick; returned
+   *  events are valid until the next tick() (the array is reused). */
   tick(dt: number, ctx: BotCtx): readonly BotEvent[] {
     this.events.length = 0;
+    this.simTime += dt;
     for (const b of this.bots) {
       if (!b.alive) {
         b.respawnIn -= dt;
@@ -337,8 +463,54 @@ export class BotManager {
         continue;
       }
       if (this.passive) continue;
+      const before = b.state;
       if (b.kind === 'soldier') stepSoldier(b, ctx, this.env, dt, this.events);
       else stepDrone(b, ctx, this.env, dt, this.events);
+      // squad alert: one bot engaging wakes patrolling teammates in earshot
+      if (before !== 'engage' && b.state === 'engage') {
+        for (const o of this.bots) {
+          if (o === b || !o.alive || o.state !== 'patrol') continue;
+          if (o.pos.distanceTo(b.pos) > SQUAD_ALERT_RADIUS) continue;
+          o.state = 'alert';
+          o.stateTime = 0;
+          o.reactionLeft = o.tune.reactionS;
+          o.lastKnown = (o.lastKnown ?? new THREE.Vector3()).copy(ctx.playerPos);
+        }
+      }
+    }
+    // scout shared intel: a fresh mark re-opens the 3s convergence window
+    for (const ev of this.events) {
+      if (ev.type !== 'bot-mark') continue;
+      this.markUntil = this.simTime + MARK_DURATION_S;
+      this.markedPos.copy(ev.pos);
+      this.markFrom.copy(ev.from);
+    }
+    if (this.simTime < this.markUntil) {
+      for (const o of this.bots) {
+        if (!o.alive || o.botClass === 'scout') continue;
+        if (o.state === 'patrol') {
+          if (o.pos.distanceTo(this.markFrom) > MARK_ALERT_RADIUS) continue;
+          o.state = 'alert';
+          o.stateTime = 0;
+          o.reactionLeft = o.tune.reactionS;
+          o.lastKnown = (o.lastKnown ?? new THREE.Vector3()).copy(this.markedPos);
+        } else {
+          // already hunting — keep the target fresh
+          o.lastKnown = (o.lastKnown ?? new THREE.Vector3()).copy(this.markedPos);
+        }
+      }
+    }
+    // heavy rockets: blasts hurt the player (main.ts) AND bots (friendly fire)
+    const blasts = this.projectiles.tick(dt, {
+      pos: ctx.playerPos,
+      radius: PLAYER_TARGET_RADIUS,
+      alive: ctx.playerAlive,
+    });
+    for (const bl of blasts) {
+      this.events.push({ type: 'projectile-blast', pos: bl.pos, damage: HEAVY_BLAST_DAMAGE });
+      for (const d of this.areaDamage(bl.pos, this.projectiles.radius, HEAVY_BLAST_DAMAGE)) {
+        this.events.push(d);
+      }
     }
     return this.events;
   }
@@ -409,6 +581,20 @@ export class BotManager {
       }
       this.posers[i]?.(b.walkPhase, aimPitch);
     }
+    // sniper telegraph lasers: muzzle → player while the charge window runs
+    let li = 0;
+    for (const b of this.bots) {
+      if (li >= this.lasers.length) break;
+      if (!b.alive || b.chargeLeft <= 0 || b.kind !== 'soldier') continue;
+      const line = this.lasers[li++];
+      const attr = line.geometry.getAttribute('position') as THREE.BufferAttribute;
+      const muzzleY = b.pos.y - SOLDIER_HEIGHT / 2 + (b.tune as SoldierTuning).muzzleHeight;
+      attr.setXYZ(0, b.pos.x, muzzleY, b.pos.z);
+      attr.setXYZ(1, playerPos.x, playerPos.y, playerPos.z);
+      attr.needsUpdate = true;
+      line.visible = true;
+    }
+    for (; li < this.lasers.length; li++) this.lasers[li].visible = false;
   }
 
   /** Find a valid floor spot; keep the bot dead and retry soon if none found.
@@ -435,6 +621,7 @@ export class BotManager {
       minSeparation: BOT_SEPARATION,
       footRadius: b.kind === 'drone' ? 0.5 : 0.4,
       clearance,
+      preferHigh: b.botClass === 'sniper', // snipers take the perch
       rng: this.rng,
     });
     if (!p) {
