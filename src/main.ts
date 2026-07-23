@@ -23,6 +23,7 @@ import { Weapon } from './game/weapon';
 import { BarrelField, BARREL_BLAST_RADIUS } from './game/barrels';
 import { TargetRegistry } from './game/targetRegistry';
 import { PlayerHealth } from './game/playerHealth';
+import { BotManager, PLAYER_SHOT_DAMAGE } from './game/bots/botManager';
 import { FxSystem } from './render/fx';
 import { Sfx } from './audio/sfx';
 import { buildTrack, deleteTrackFor, exportTrackJson, fetchServerTrack, savedTrackFor, saveTrackFor } from './world/bsp/bspTracks';
@@ -124,6 +125,7 @@ const weapon = new Weapon();
 const targetRegistry = new TargetRegistry();
 const playerHealth = new PlayerHealth(100);
 let barrels: BarrelField | null = null;
+let bots: BotManager | null = null;
 const fx = new FxSystem(scene);
 const sfx = new Sfx();
 
@@ -263,6 +265,30 @@ if (bspName) {
             quad.vel.set(0, 0, 0);
             quad.thrust = 0;
             flash('CAUGHT IN THE BLAST!');
+          }
+        },
+      });
+
+      // enemy bots (war mode): 2 drones + 3 soldiers, spawned on real floors
+      const bm = new BotManager(
+        world.collision,
+        { minX, maxX, minZ, maxZ },
+        spawnCheckpoint.pos,
+        world.geometryFloorAt,
+        bsp.spawns.slice(1), // the map's unused player spawns make natural bot posts
+      );
+      bots = bm;
+      scene.add(bm.group);
+      targetRegistry.register({
+        get targets() { return bm.targets; },
+        onHit: (i) => {
+          const died = bm.hit(i, PLAYER_SHOT_DAMAGE);
+          if (died) {
+            fx.explosion(died.pos);
+            sfx.explode();
+            flash(`${died.kind === 'drone' ? 'DRONE' : 'SOLDIER'} DOWN — ${bm.kills}`, 900);
+          } else {
+            fx.impact(bm.targets[i].pos);
           }
         },
       });
@@ -590,6 +616,15 @@ const hooks = {
       if (shot.targetIndex !== null) targetRegistry.dispatchHit(shot.targetIndex);
     }
     barrels?.tick(dt);
+    if (bots) {
+      bots.passive = editingTrack;
+      bots.tick(dt, {
+        playerPos: quad.pos,
+        playerVel: quad.vel,
+        playerAlive: !quad.crashed,
+        playerNoise: !!shot,
+      });
+    }
   },
 
   renderTick(alpha: number, frameDt: number) {
@@ -607,6 +642,7 @@ const hooks = {
 
     rig.update(frameDt);
     fx.update(frameDt);
+    bots?.updateVisuals(frameDt, renderPos);
 
     // HUD (attitude from render quaternion; YXZ = yaw→pitch→roll order)
     _e.setFromQuaternion(renderQ, 'YXZ');
@@ -625,6 +661,8 @@ const hooks = {
     hudData.gateCount = race ? race.track.gates.length : 0;
     hudData.mode = race && !settings.freeFly && !editingTrack ? 'race' : 'freefly';
     hudData.score = barrels ? barrels.score : null;
+    hudData.hp = bots ? playerHealth.hp : null;
+    hudData.kills = bots ? bots.kills : null;
     hudData.camera = rig.getMode();
     const cd = race && !settings.freeFly ? race.countdownLeft() : null;
     hudData.countdown = cd !== null ? Math.ceil(cd) : null;
@@ -648,9 +686,10 @@ addEventListener('resize', () => {
 // expose for console debugging
 Object.assign(window as unknown as Record<string, unknown>, {
   __fpv: {
-    quad, settings, params, input, weapon, fx, dt: PHYS_DT,
+    quad, settings, params, input, weapon, fx, playerHealth, dt: PHYS_DT,
     get race() { return race; },
     get barrels() { return barrels; },
+    get bots() { return bots; },
     get collisionWorld() { return collisionWorld; },
     /** Drive N physics ticks + one render manually (rAF-independent test hook). */
     step(n = 240): void {

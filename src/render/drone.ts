@@ -8,9 +8,12 @@ import * as THREE from 'three';
  * - Front props orange, rear grey
  * - <15 meshes, ≤5 materials, props at y≈0.02
  * 
+ * @param opts.accent recolors the front props + LED (enemy bots use red);
+ *                    default keeps the player's orange/red scheme
  * @returns Group with origin at center of mass; forward is -Z
  */
-export function createDroneMesh(): THREE.Group {
+export function createDroneMesh(opts?: { accent?: number }): THREE.Group {
+  const accent = opts?.accent;
   const group = new THREE.Group();
 
   // Shared materials (5 total)
@@ -25,7 +28,7 @@ export function createDroneMesh(): THREE.Group {
     metalness: 0.5,
   });
   const matPropFront = new THREE.MeshStandardMaterial({
-    color: 0xff8800,
+    color: accent ?? 0xff8800,
     roughness: 0.6,
     metalness: 0.2,
     transparent: true,
@@ -41,8 +44,8 @@ export function createDroneMesh(): THREE.Group {
     side: THREE.DoubleSide,
   });
   const matLED = new THREE.MeshStandardMaterial({
-    color: 0xff2222,
-    emissive: 0xff2222,
+    color: accent ?? 0xff2222,
+    emissive: accent ?? 0xff2222,
     emissiveIntensity: 1.0,
     roughness: 0.2,
     metalness: 0.8,
