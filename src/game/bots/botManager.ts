@@ -1,41 +1,31 @@
 /** Enemy bot orchestrator — owns the bot list, their meshes, spawning and
- *  respawn timers. Phase A scope: static shootable dummies (2 hovering drones,
- *  3 standing soldiers); patrol/aim/fire AI lands with botBrain in B1.5/B1.6.
+ *  respawn timers, and drives each bot's brain from the physics tick.
+ *  Soldiers run the full patrol/alert/engage/seek machine (botBrain); drones
+ *  are still hovering dummies until B1.6.
  *
  *  Sim/render split: tick() runs at 240 Hz from simTick and never touches
  *  meshes except through placeAt (like BarrelField); updateVisuals() runs from
- *  renderTick only. Deterministic: one seeded rng for all placement. */
+ *  renderTick only. Deterministic: seeded manager rng for placement plus one
+ *  seeded stream per bot for aim error. */
 import * as THREE from 'three';
 import { createDroneMesh } from '../../render/drone';
+import { createSoldierMesh, SOLDIER_HEIGHT } from '../../render/soldierMesh';
 import type { CollisionWorld } from '../../physics/quad';
 import type { ShotTarget } from '../weapon';
 import { mulberry32 } from '../rng';
 import { samplePoint } from './placement';
+import { stepSoldier } from './botBrain';
+import type { SoldierEnv } from './botBrain';
 import { PLAYER_SHOT_DAMAGE, TUNING } from './types';
-import type { Bot, BotCtx, BotDiedEvent, BotKind } from './types';
+import type { Bot, BotCtx, BotDiedEvent, BotEvent, BotKind } from './types';
 
 export { PLAYER_SHOT_DAMAGE };
 
 /** Bots never (re)spawn closer to the player spawn than this. */
 const SPAWN_CLEARANCE = 20;
 const BOT_SEPARATION = 8;
-const SOLDIER_HEIGHT = 1.8;
-
-function createSoldierPlaceholder(): THREE.Group {
-  // Capsule stand-in until the articulated soldier mesh (B1.4). Origin at feet.
-  const group = new THREE.Group();
-  const mat = new THREE.MeshStandardMaterial({ color: 0x3d5230, roughness: 0.8, metalness: 0.1 });
-  const body = new THREE.Mesh(new THREE.CapsuleGeometry(0.35, SOLDIER_HEIGHT - 0.7, 4, 8), mat);
-  body.position.y = SOLDIER_HEIGHT / 2;
-  group.add(body);
-  const visor = new THREE.Mesh(
-    new THREE.BoxGeometry(0.3, 0.08, 0.05),
-    new THREE.MeshStandardMaterial({ color: 0xff2222, emissive: 0xff2222, emissiveIntensity: 0.8 }),
-  );
-  visor.position.set(0, SOLDIER_HEIGHT - 0.35, -0.3);
-  group.add(visor);
-  return group;
-}
+/** Patrol waypoints only need to clear the immediate spawn area. */
+const WAYPOINT_CLEARANCE = 8;
 
 export class BotManager {
   readonly group = new THREE.Group();
@@ -44,11 +34,15 @@ export class BotManager {
   passive = false;
 
   private bots: Bot[] = [];
+  /** Parallel to bots: soldier pose driver (null for drones). */
+  private posers: (((walkPhase: number, aimPitch: number) => void) | null)[] = [];
   private rng: () => number;
   private world: CollisionWorld;
   private bounds: { minX: number; maxX: number; minZ: number; maxZ: number };
   private avoid: THREE.Vector3;
   private strictFloor: ((x: number, z: number) => number | null) | null;
+  private env: SoldierEnv;
+  private events: BotEvent[] = [];
 
   /** extraSpawns: the map's unused info_player_* points (bsp.spawns[1..]) —
    *  consumed for initial placement before falling back to sampling. */
@@ -67,11 +61,36 @@ export class BotManager {
     this.strictFloor = strictFloor;
     this.rng = mulberry32(seed);
     this.group.name = 'bots';
+    this.env = {
+      world,
+      floorAt: (x, z) => (this.strictFloor ? this.strictFloor(x, z) : this.world.floorAt(x, 200, z)),
+      sampleWaypoint: () =>
+        samplePoint({
+          world: this.world,
+          bounds: this.bounds,
+          strictFloor: this.strictFloor,
+          avoid: this.avoid,
+          avoidRadius: WAYPOINT_CLEARANCE,
+          others: [],
+          minSeparation: 0,
+          footRadius: 0.4,
+          clearance: SOLDIER_HEIGHT + 0.4,
+          rng: this.rng,
+        }),
+    };
 
     const fixedSpawns = [...extraSpawns];
-    const make = (kind: BotKind): void => {
-      const mesh = kind === 'drone' ? createDroneMesh({ accent: 0xff2222 }) : createSoldierPlaceholder();
-      if (kind === 'drone') mesh.scale.setScalar(1.6); // readable at range
+    const make = (kind: BotKind, index: number): void => {
+      let mesh: THREE.Group;
+      let poser: ((walkPhase: number, aimPitch: number) => void) | null = null;
+      if (kind === 'drone') {
+        mesh = createDroneMesh({ accent: 0xff2222 });
+        mesh.scale.setScalar(1.6); // readable at range
+      } else {
+        const s = createSoldierMesh();
+        mesh = s.group;
+        poser = s.setPose;
+      }
       const b: Bot = {
         kind,
         pos: new THREE.Vector3(),
@@ -83,14 +102,25 @@ export class BotManager {
         yaw: 0,
         respawnIn: 0,
         mesh,
+        rng: mulberry32(seed + 101 * (index + 1)),
+        stateTime: 0,
+        trackTime: 0,
+        reactionLeft: 0,
+        burstLeft: 0,
+        fireCooldown: 0,
+        waypoint: null,
+        lastKnown: null,
+        walkPhase: 0,
       };
       mesh.visible = false;
       this.group.add(mesh);
       this.bots.push(b);
+      this.posers.push(poser);
       this.place(b, fixedSpawns);
     };
-    for (let i = 0; i < counts.drones; i++) make('drone');
-    for (let i = 0; i < counts.soldiers; i++) make('soldier');
+    let idx = 0;
+    for (let i = 0; i < counts.drones; i++) make('drone', idx++);
+    for (let i = 0; i < counts.soldiers; i++) make('soldier', idx++);
   }
 
   get targets(): readonly ShotTarget[] {
@@ -116,22 +146,43 @@ export class BotManager {
     return { type: 'bot-died', kind: b.kind, pos: b.pos };
   }
 
-  /** Respawn timers (AI steps join here in B1.5). Call once per physics tick. */
-  tick(dt: number, _ctx: BotCtx): void {
+  /** AI + respawn timers. Call once per physics tick; returned events are
+   *  valid until the next tick() (the array is reused). */
+  tick(dt: number, ctx: BotCtx): readonly BotEvent[] {
+    this.events.length = 0;
     for (const b of this.bots) {
-      if (b.alive) continue;
-      b.respawnIn -= dt;
-      if (b.respawnIn <= 0) this.place(b); // respawn always at a fresh sampled spot
+      if (!b.alive) {
+        b.respawnIn -= dt;
+        if (b.respawnIn <= 0) this.place(b); // respawn always at a fresh sampled spot
+        continue;
+      }
+      if (this.passive) continue;
+      if (b.kind === 'soldier') stepSoldier(b, ctx, this.env, dt, this.events);
     }
+    return this.events;
   }
 
   /** Render-frame mesh dressing only — never called from the sim tick. */
-  updateVisuals(_frameDt: number, playerPos: THREE.Vector3): void {
-    for (const b of this.bots) {
+  updateVisuals(frameDt: number, playerPos: THREE.Vector3): void {
+    for (let i = 0; i < this.bots.length; i++) {
+      const b = this.bots[i];
       if (!b.alive) continue;
-      // face the player (yaw only) so the dummies read as "watching you"
-      b.yaw = Math.atan2(playerPos.x - b.pos.x, playerPos.z - b.pos.z) + Math.PI;
+      if (b.kind === 'drone') {
+        // dummy behavior until B1.6: hold position, watch the player
+        b.yaw = Math.atan2(-(playerPos.x - b.pos.x), -(playerPos.z - b.pos.z));
+        b.mesh.rotation.y = b.yaw;
+        continue;
+      }
+      const feetY = b.pos.y - SOLDIER_HEIGHT / 2;
+      b.mesh.position.set(b.pos.x, feetY, b.pos.z);
       b.mesh.rotation.y = b.yaw;
+      b.walkPhase += b.vel.length() * frameDt * 5.5;
+      let aimPitch = 0;
+      if (b.state === 'alert' || b.state === 'engage') {
+        const dy = playerPos.y - (feetY + TUNING.soldier.muzzleHeight);
+        aimPitch = Math.atan2(dy, Math.hypot(playerPos.x - b.pos.x, playerPos.z - b.pos.z));
+      }
+      this.posers[i]?.(b.walkPhase, aimPitch);
     }
   }
 
@@ -182,6 +233,13 @@ export class BotManager {
     b.hp = tune.hp;
     b.alive = true;
     b.state = 'patrol';
+    b.stateTime = 0;
+    b.trackTime = 0;
+    b.reactionLeft = 0;
+    b.burstLeft = 0;
+    b.fireCooldown = 0;
+    b.waypoint = null;
+    b.lastKnown = null;
     b.vel.set(0, 0, 0);
     b.yaw = yaw;
     b.mesh.rotation.y = yaw;

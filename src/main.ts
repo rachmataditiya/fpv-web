@@ -618,12 +618,29 @@ const hooks = {
     barrels?.tick(dt);
     if (bots) {
       bots.passive = editingTrack;
-      bots.tick(dt, {
+      // player's shot resolved above — a bot killed this tick cannot return fire
+      const botEvents = bots.tick(dt, {
         playerPos: quad.pos,
         playerVel: quad.vel,
         playerAlive: !quad.crashed,
         playerNoise: !!shot,
       });
+      for (const ev of botEvents) {
+        if (ev.type !== 'bot-shot') continue;
+        fx.tracer(ev.from, ev.to);
+        fx.muzzle(ev.from);
+        sfx.shoot();
+        if (ev.hitPlayer && !quad.crashed) {
+          hud.pulseDamage();
+          if (playerHealth.damage(ev.damage)) {
+            quad.crashed = true;
+            quad.crashTimer = params.respawnDelay;
+            quad.vel.set(0, 0, 0);
+            quad.thrust = 0;
+            flash('YOU DIED');
+          }
+        }
+      }
     }
   },
 
