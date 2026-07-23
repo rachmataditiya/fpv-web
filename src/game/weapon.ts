@@ -5,7 +5,8 @@
  *  sweep); barrels are tested as bounding spheres — nearest hit wins. */
 import * as THREE from 'three';
 import type { CollisionWorld } from '../physics/quad';
-import { mulberry32 } from './rng';
+import { mulberry32Stateful } from './rng';
+import type { StatefulRng } from './rng';
 
 export const WEAPON_RANGE = 300;   // m
 export const WEAPON_COOLDOWN = 0.11; // s — ~9 rounds/s, rifle-like
@@ -40,11 +41,24 @@ export class Weapon {
   private queued = false;
   /** Sustained-fire heat → spread cone (first shot is laser-accurate). */
   private heat = 0;
-  private rng = mulberry32(0xf1e2d3);
+  private rng: StatefulRng = mulberry32Stateful(0xf1e2d3);
 
   /** Called from the input action edge (any thread-of-control). */
   requestFire(): void {
     this.queued = true;
+  }
+
+  /** Snapshot the sim-relevant state (cooldown/heat/rng draw position) so a
+   *  replay can re-simulate shots bit-exactly from this point. */
+  serialize(): { cooldown: number; heat: number; rngState: number } {
+    return { cooldown: this.cooldown, heat: this.heat, rngState: this.rng.getState() };
+  }
+
+  restore(s: { cooldown: number; heat: number; rngState: number }): void {
+    this.cooldown = s.cooldown;
+    this.heat = s.heat;
+    this.queued = false;
+    this.rng.setState(s.rngState);
   }
 
   /** Advance cooldown; if a shot is queued and ready, resolve it.

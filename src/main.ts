@@ -24,6 +24,8 @@ import { BarrelField, BARREL_BLAST_RADIUS } from './game/barrels';
 import { TargetRegistry } from './game/targetRegistry';
 import { PlayerHealth } from './game/playerHealth';
 import { BotManager, PLAYER_SHOT_DAMAGE } from './game/bots/botManager';
+import { ReplayRecorder, ReplayPlayer } from './game/replay';
+import type { QuadSnapshot } from './game/replay';
 import { FxSystem } from './render/fx';
 import { Sfx } from './audio/sfx';
 import { buildTrack, deleteTrackFor, exportTrackJson, fetchServerTrack, savedTrackFor, saveTrackFor } from './world/bsp/bspTracks';
@@ -127,8 +129,32 @@ const targetRegistry = new TargetRegistry();
 const playerHealth = new PlayerHealth(100);
 let barrels: BarrelField | null = null;
 let bots: BotManager | null = null;
+/** Builds bots identical to the live set — stored by the BSP-load closure so
+ *  killcam playback bots match exactly (world/bounds/spawns/counts/seed/diff). */
+let makeBots: (() => BotManager) | null = null;
 const fx = new FxSystem(scene);
 const sfx = new Sfx();
+
+// replay recording (Wave 2): inputs + full-state snapshots every sim tick —
+// the sim is deterministic from (snapshot + input stream), so this is all the
+// killcam needs. Zero behavioral impact on the live path.
+const recorder = new ReplayRecorder();
+const snapQuad = (): QuadSnapshot => ({
+  pos: quad.pos.toArray(),
+  vel: quad.vel.toArray(),
+  quat: quad.q.toArray(),
+  angVel: quad.omega.toArray(),
+  thrust: quad.thrust,
+  armed: quad.armed,
+  crashed: quad.crashed,
+  crashTimer: quad.crashTimer,
+});
+recorder.captureFn = () => ({
+  quad: snapQuad(),
+  hp: playerHealth.hp,
+  weapon: weapon.serialize(),
+  bots: bots ? bots.serialize() : null,
+});
 
 // track editor (BSP maps)
 let editingTrack = false;
@@ -198,6 +224,48 @@ function startBspRace(t: TrackDef): void {
 function respawn(): void {
   resetQuad(quad, checkpoint().pos, checkpoint().yawDeg, 0.5);
   playerHealth.reset();
+}
+
+// ---------- killcam (Wave 2): replay the last ~5s from the killer's POV ----------
+let killcam: { player: ReplayPlayer; killerIdx: number } | null = null;
+
+function startKillcam(killerIdx: number): void {
+  if (!bots || !collisionWorld || !makeBots || killerIdx < 0) return;
+  const player = new ReplayPlayer({
+    world: collisionWorld,
+    params,
+    checkpoint: checkpoint(),
+    oobY: bspName ? -80 : null,
+    uptiltDeg: settings.uptiltDeg,
+    makeBots,
+    fx,
+  });
+  // ~5s back; load clamps to the oldest snapshot when the buffer is younger
+  if (!player.load(recorder.data(), recorder.tickIndex - 1200)) return;
+  if (!player.bots) return; // snapshot predates the bot spawn — nothing to watch
+  scene.add(player.bots.group);
+  bots.group.visible = false;
+  // the shared camera is driven directly this frame on: re-parent it to the
+  // scene root (FPV mode parents it to the drone group, so a plain
+  // position/lookAt would be in drone-local space)
+  scene.add(rig.camera);
+  rig.camera.rotation.set(0, 0, 0);
+  droneVisual.visible = true; // your own drone is the star of the replay
+  killcam = { player, killerIdx };
+}
+
+function endKillcam(): void {
+  if (!killcam) return;
+  if (killcam.player.bots) scene.remove(killcam.player.bots.group);
+  if (bots) bots.group.visible = true;
+  killcam = null;
+  // restore the rig's camera parenting/transforms (setMode no-ops on the same
+  // mode, so hop away and back to force applyMode)
+  const mode = rig.getMode();
+  rig.setMode(mode === 'fpv' ? 'chase' : 'fpv');
+  rig.setMode(mode);
+  respawn();
+  flash('YOU DIED', 900);
 }
 
 function restartRace(): void {
@@ -272,16 +340,20 @@ if (bspName) {
 
       // enemy bots (war mode): 2 drones + 3 soldiers, spawned on real floors
       if (settings.bots) {
-        const bm = new BotManager(
-          world.collision,
-          { minX, maxX, minZ, maxZ },
-          spawnCheckpoint.pos,
-          world.geometryFloorAt,
-          bsp.spawns.slice(1), // the map's unused player spawns make natural bot posts
-          { drones: 2, soldiers: 3 },
-          4242,
-          { difficulty: settings.botDifficulty, fx },
-        );
+        // factory preserved for killcam playback bots (identical construction)
+        const botDifficulty = settings.botDifficulty;
+        makeBots = () =>
+          new BotManager(
+            world.collision,
+            { minX, maxX, minZ, maxZ },
+            spawnCheckpoint.pos,
+            world.geometryFloorAt,
+            bsp.spawns.slice(1), // the map's unused player spawns make natural bot posts
+            { drones: 2, soldiers: 3 },
+            4242,
+            { difficulty: botDifficulty, fx },
+          );
+        const bm = makeBots();
         bots = bm;
         scene.add(bm.group);
         targetRegistry.register({
@@ -289,6 +361,7 @@ if (bspName) {
           onHit: (i) => {
             const died = bm.hit(i, PLAYER_SHOT_DAMAGE);
             if (died) {
+              recorder.logEvent('bot-died', [died.pos.x, died.pos.y, died.pos.z]);
               fx.explosion(died.pos);
               sfx.explode();
               hud.pulseKill();
@@ -320,11 +393,18 @@ if (bspName) {
 }
 
 input.onAction = (a) => {
+  // Killcam: FIRE/RESPAWN skips back to live; every other action except pause
+  // is swallowed so the frozen live sim isn't touched mid-replay.
+  if (killcam) {
+    if (a === 'shoot' || a === 'respawn') endKillcam();
+    if (a !== 'pause') return;
+  }
   // While paused only 'pause' (resume) is allowed — edges are still sampled from
   // renderTick so the sim stays controllable, but arming/respawning is blocked.
   if (loop.paused && a !== 'pause') return;
   switch (a) {
     case 'arm':
+      recorder.recordAction('arm');
       if (!quad.armed) {
         // safety: require low throttle to arm (like a real FC). Uses the throttle
         // from the current sample — onAction fires from inside sample(), so
@@ -341,6 +421,7 @@ input.onAction = (a) => {
       }
       break;
     case 'respawn':
+      recorder.recordAction('respawn');
       respawn();
       break;
     case 'camera':
@@ -351,6 +432,7 @@ input.onAction = (a) => {
       togglePause();
       break;
     case 'shoot':
+      recorder.recordAction('shoot');
       if (quad.armed && !quad.crashed) weapon.requestFire();
       break;
     case 'restart':
@@ -592,6 +674,7 @@ const _hitEuler = new THREE.Euler();
 const _aimQ = new THREE.Quaternion();
 const _uptiltQ = new THREE.Quaternion();
 const _aimX = new THREE.Vector3(1, 0, 0);
+const _kcEye = new THREE.Vector3(); // killcam killer-eye anchor
 let whirrAcc = 0; // sim seconds since the last enemy-drone whirr ping
 
 const hooks = {
@@ -599,8 +682,15 @@ const hooks = {
     keyboard.tick(dt);
     mock?.tick(performance.now());
 
+    if (killcam) {
+      input.sample(); // keep action edges flowing so FIRE/RESPAWN can skip
+      if (!killcam.player.step(dt)) endKillcam();
+      return; // live sim is frozen while the replay runs
+    }
+
     const cmd = input.sample();
     lastThrottle = cmd.throttle;
+    recorder.recordTick(cmd, input.held('shoot'));
 
     prevPos.copy(quad.pos);
     prevQ.copy(quad.q);
@@ -620,6 +710,7 @@ const hooks = {
     _aimQ.copy(quad.q).multiply(_uptiltQ);
     const shot = weapon.tick(dt, quad.pos, _aimQ, collisionWorld, targetRegistry.collect());
     if (shot) {
+      recorder.logEvent('shot', [shot.from.x, shot.from.y, shot.from.z, shot.to.x, shot.to.y, shot.to.z]);
       fx.tracer(shot.from, shot.to);
       fx.muzzle(shot.from);
       if (shot.hitWorld) fx.impact(shot.to);
@@ -638,6 +729,7 @@ const hooks = {
       });
       for (const ev of botEvents) {
         if (ev.type !== 'bot-shot') continue;
+        recorder.logEvent('bot-shot', [ev.from.x, ev.from.y, ev.from.z, ev.to.x, ev.to.y, ev.to.z, ev.hitPlayer ? 1 : 0]);
         fx.tracer(ev.from, ev.to);
         fx.muzzle(ev.from);
         sfx.botShoot();
@@ -652,6 +744,8 @@ const hooks = {
             quad.vel.set(0, 0, 0);
             quad.thrust = 0;
             flash('YOU DIED');
+            recorder.logEvent('player-died', [quad.pos.x, quad.pos.y, quad.pos.z]);
+            startKillcam(bots.targets.indexOf(ev.shooter));
           }
         }
       }
@@ -676,15 +770,29 @@ const hooks = {
       keyboard.tick(frameDt);
       input.sample();
     }
-    // interpolate between the last two physics states for smooth rendering
-    renderPos.lerpVectors(prevPos, quad.pos, alpha);
-    renderQ.slerpQuaternions(prevQ, quad.q, alpha);
-    droneVisual.position.copy(renderPos);
-    droneVisual.quaternion.copy(renderQ);
+    if (killcam) {
+      // replay interpolation (playback prev→cur) and the killer's eye as the
+      // camera — rig.update is skipped so it can't fight the direct drive
+      const kp = killcam.player;
+      renderPos.lerpVectors(kp.prevPos, kp.quad.pos, alpha);
+      renderQ.slerpQuaternions(kp.prevQ, kp.quad.q, alpha);
+      droneVisual.position.copy(renderPos);
+      droneVisual.quaternion.copy(renderQ);
+      fx.update(frameDt);
+      kp.bots?.updateVisuals(frameDt, renderPos); // playback bots, not live
+      if (kp.botEye(killcam.killerIdx, _kcEye)) rig.camera.position.copy(_kcEye);
+      rig.camera.lookAt(renderPos);
+    } else {
+      // interpolate between the last two physics states for smooth rendering
+      renderPos.lerpVectors(prevPos, quad.pos, alpha);
+      renderQ.slerpQuaternions(prevQ, quad.q, alpha);
+      droneVisual.position.copy(renderPos);
+      droneVisual.quaternion.copy(renderQ);
 
-    rig.update(frameDt);
-    fx.update(frameDt);
-    bots?.updateVisuals(frameDt, renderPos);
+      rig.update(frameDt);
+      fx.update(frameDt);
+      bots?.updateVisuals(frameDt, renderPos);
+    }
 
     // HUD (attitude from render quaternion; YXZ = yaw→pitch→roll order)
     _e.setFromQuaternion(renderQ, 'YXZ');
@@ -709,7 +817,7 @@ const hooks = {
     const cd = race && !settings.freeFly ? race.countdownLeft() : null;
     hudData.countdown = cd !== null ? Math.ceil(cd) : null;
     if (message && performance.now() > messageUntil) message = null;
-    hudData.message = loop.paused ? 'PAUSED — ESC TO RESUME' : message;
+    hudData.message = killcam ? 'WATCH KILLCAM — FIRE TO SKIP' : loop.paused ? 'PAUSED — ESC TO RESUME' : message;
     hud.update(hudData);
 
     renderer.render(scene, rig.camera);
@@ -729,6 +837,8 @@ addEventListener('resize', () => {
 Object.assign(window as unknown as Record<string, unknown>, {
   __fpv: {
     quad, settings, params, input, weapon, fx, playerHealth, dt: PHYS_DT,
+    recorder,
+    get killcam() { return killcam; },
     get race() { return race; },
     get barrels() { return barrels; },
     get bots() { return bots; },

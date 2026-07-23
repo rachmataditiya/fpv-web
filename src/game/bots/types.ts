@@ -3,6 +3,7 @@
  *  TargetRegistry; AI state fields are consumed by botBrain. */
 import * as THREE from 'three';
 import type { ShotTarget } from '../weapon';
+import type { StatefulRng } from '../rng';
 
 export type BotKind = 'drone' | 'soldier';
 export type BotAiState = 'patrol' | 'alert' | 'engage' | 'seek' | 'dead';
@@ -105,8 +106,9 @@ export interface Bot extends ShotTarget {
   yaw: number;
   respawnIn: number; // s, counts down while dead
   mesh: THREE.Group;
-  /** Per-bot seeded stream (aim error etc.) — placement uses the manager's. */
-  rng: () => number;
+  /** Per-bot seeded stream (aim error etc.) — placement uses the manager's.
+   *  Stateful so replay snapshots can restore the exact draw position. */
+  rng: StatefulRng;
   // --- AI working state (botBrain) ---
   stateTime: number;
   /** Continuous-LOS time — aim tightens while it grows. */
@@ -143,6 +145,8 @@ export interface BotShotEvent {
   to: THREE.Vector3;
   hitPlayer: boolean;
   damage: number;
+  /** The bot that fired — killcam keys the killer POV off this. */
+  shooter: Bot;
 }
 
 export type BotEvent = BotDiedEvent | BotShotEvent;

@@ -14,15 +14,46 @@ import type { FxSystem } from '../../render/fx';
 import type { CollisionWorld } from '../../physics/quad';
 import type { ShotTarget } from '../weapon';
 import type { BotDifficulty } from '../../state';
-import { mulberry32 } from '../rng';
+import { mulberry32Stateful } from '../rng';
+import type { StatefulRng } from '../rng';
 import { samplePoint } from './placement';
 import { stepDrone, stepSoldier } from './botBrain';
 import type { BotEnv } from './botBrain';
 import { applyDifficulty } from './difficulty';
 import { PLAYER_SHOT_DAMAGE, TUNING } from './types';
-import type { Bot, BotCtx, BotDiedEvent, BotEvent, BotKind, DroneTuning, SoldierTuning } from './types';
+import type { Bot, BotAiState, BotCtx, BotDiedEvent, BotEvent, BotKind, DroneTuning, SoldierTuning } from './types';
 
 export { PLAYER_SHOT_DAMAGE };
+
+/** Flat per-bot snapshot row (serialize/restore):
+ *  [0]  kindIdx      0=drone, 1=soldier
+ *  [1]  alive        0/1
+ *  [2]  hp
+ *  [3..5]   pos xyz
+ *  [6..8]   vel xyz
+ *  [9]  yaw
+ *  [10] stateIdx     0=patrol, 1=alert, 2=engage, 3=seek, 4=dead
+ *  [11] stateTime
+ *  [12] trackTime
+ *  [13] reactionLeft
+ *  [14] burstLeft
+ *  [15] fireCooldown
+ *  [16] hasWaypoint  0/1
+ *  [17..19] waypoint xyz
+ *  [20] wpTime
+ *  [21] hasLastKnown 0/1
+ *  [22..24] lastKnown xyz
+ *  [25] walkPhase
+ *  [26] respawnIn
+ *  [27] rngState     bot stream position before the next draw */
+export interface BotsSnapshot {
+  kills: number;
+  rngState: number;
+  bots: number[][];
+}
+
+const STATE_IDX: Record<BotAiState, number> = { patrol: 0, alert: 1, engage: 2, seek: 3, dead: 4 };
+const STATE_BY_IDX: readonly BotAiState[] = ['patrol', 'alert', 'engage', 'seek', 'dead'];
 
 /** Bots never (re)spawn closer to the player spawn than this. */
 const SPAWN_CLEARANCE = 20;
@@ -65,7 +96,7 @@ export class BotManager {
   private deathAnims: (DeathAnim | null)[] = [];
   private tuning: { drone: DroneTuning; soldier: SoldierTuning };
   private fx: FxSystem | null;
-  private rng: () => number;
+  private rng: StatefulRng;
   private world: CollisionWorld;
   private bounds: { minX: number; maxX: number; minZ: number; maxZ: number };
   private avoid: THREE.Vector3;
@@ -94,7 +125,7 @@ export class BotManager {
       drone: applyDifficulty(TUNING.drone, opts.difficulty ?? 'normal'),
       soldier: applyDifficulty(TUNING.soldier, opts.difficulty ?? 'normal'),
     };
-    this.rng = mulberry32(seed);
+    this.rng = mulberry32Stateful(seed);
     this.group.name = 'bots';
     this.env = {
       world,
@@ -154,7 +185,7 @@ export class BotManager {
         yaw: 0,
         respawnIn: 0,
         mesh,
-        rng: mulberry32(seed + 101 * (index + 1)),
+        rng: mulberry32Stateful(seed + 101 * (index + 1)),
         stateTime: 0,
         trackTime: 0,
         reactionLeft: 0,
@@ -208,6 +239,81 @@ export class BotManager {
       smoked: 0,
     };
     return { type: 'bot-died', kind: b.kind, pos: b.pos };
+  }
+
+  /** Full sim-state snapshot (see BotsSnapshot for the row layout) — replay
+   *  re-simulation restores this and draws identical rng sequences from here. */
+  serialize(): BotsSnapshot {
+    return {
+      kills: this.kills,
+      rngState: this.rng.getState(),
+      bots: this.bots.map((b) => [
+        b.kind === 'drone' ? 0 : 1,
+        b.alive ? 1 : 0,
+        b.hp,
+        b.pos.x, b.pos.y, b.pos.z,
+        b.vel.x, b.vel.y, b.vel.z,
+        b.yaw,
+        STATE_IDX[b.state],
+        b.stateTime,
+        b.trackTime,
+        b.reactionLeft,
+        b.burstLeft,
+        b.fireCooldown,
+        b.waypoint ? 1 : 0,
+        b.waypoint?.x ?? 0, b.waypoint?.y ?? 0, b.waypoint?.z ?? 0,
+        b.wpTime,
+        b.lastKnown ? 1 : 0,
+        b.lastKnown?.x ?? 0, b.lastKnown?.y ?? 0, b.lastKnown?.z ?? 0,
+        b.walkPhase,
+        b.respawnIn,
+        b.rng.getState(),
+      ]),
+    };
+  }
+
+  /** Overwrite all sim state from a snapshot. Precondition: this manager was
+   *  constructed with the same counts + seed as the snapshotted one (same bot
+   *  count/order). Draws NOTHING from any rng — construction-time draws are
+   *  fully overwritten, including every stream's state. */
+  restore(s: BotsSnapshot): void {
+    this.kills = s.kills;
+    this.rng.setState(s.rngState);
+    for (let i = 0; i < this.bots.length; i++) {
+      const b = this.bots[i];
+      const r = s.bots[i];
+      b.alive = r[1] !== 0;
+      b.hp = r[2];
+      b.pos.set(r[3], r[4], r[5]);
+      b.vel.set(r[6], r[7], r[8]);
+      b.yaw = r[9];
+      b.state = STATE_BY_IDX[r[10]] ?? 'patrol';
+      b.stateTime = r[11];
+      b.trackTime = r[12];
+      b.reactionLeft = r[13];
+      b.burstLeft = r[14];
+      b.fireCooldown = r[15];
+      if (r[16] !== 0) {
+        b.waypoint = (b.waypoint ?? new THREE.Vector3()).set(r[17], r[18], r[19]);
+      } else {
+        b.waypoint = null;
+      }
+      b.wpTime = r[20];
+      if (r[21] !== 0) {
+        b.lastKnown = (b.lastKnown ?? new THREE.Vector3()).set(r[22], r[23], r[24]);
+      } else {
+        b.lastKnown = null;
+      }
+      b.walkPhase = r[25];
+      b.respawnIn = r[26];
+      b.rng.setState(r[27]);
+      // render-side cleanup: no dying meshes carried over from construction
+      this.deathAnims[i] = null;
+      this.downers[i]?.(0); // stand soldier meshes back up
+      b.mesh.visible = b.alive;
+      b.mesh.rotation.x = 0;
+      b.mesh.rotation.z = 0;
+    }
   }
 
   /** Distance to the nearest living drone bot (Infinity when none) — the

@@ -130,7 +130,7 @@ function fireAt(
     _muzzle, ctx.playerPos, ctx.playerVel.length(), PLAYER_TARGET_RADIUS,
     b.trackTime, env.world, b.rng, k,
   );
-  events.push({ type: 'bot-shot', from: _muzzle.clone(), to: shot.to, hitPlayer: shot.hitPlayer, damage: k.damage });
+  events.push({ type: 'bot-shot', from: _muzzle.clone(), to: shot.to, hitPlayer: shot.hitPlayer, damage: k.damage, shooter: b });
   b.burstLeft--;
   if (b.burstLeft <= 0) {
     b.burstLeft = k.burstCount;

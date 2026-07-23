@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import * as THREE from 'three';
-import { mulberry32 } from '../../rng';
+import { mulberry32Stateful } from '../../rng';
 import { stepDrone, stepSoldier, yawToward } from '../botBrain';
 import type { BotEnv } from '../botBrain';
 import { TUNING } from '../types';
@@ -46,7 +46,7 @@ function soldier(x = 0, z = 0, yaw = 0, seed = 7): Bot {
     yaw,
     respawnIn: 0,
     mesh: new THREE.Group(),
-    rng: mulberry32(seed),
+    rng: mulberry32Stateful(seed),
     stateTime: 0,
     trackTime: 0,
     reactionLeft: 0,
