@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import * as THREE from 'three';
 import { mulberry32 } from '../../rng';
-import { stepSoldier, yawToward } from '../botBrain';
-import type { SoldierEnv } from '../botBrain';
+import { stepDrone, stepSoldier, yawToward } from '../botBrain';
+import type { BotEnv } from '../botBrain';
 import { TUNING } from '../types';
 import type { Bot, BotCtx, BotEvent } from '../types';
 import type { CollisionWorld } from '../../../physics/quad';
@@ -24,7 +24,7 @@ const walledWorld: CollisionWorld = {
   },
 };
 
-function env(world: CollisionWorld = openWorld, over: Partial<SoldierEnv> = {}): SoldierEnv {
+function env(world: CollisionWorld = openWorld, over: Partial<BotEnv> = {}): BotEnv {
   return {
     world,
     floorAt: () => 0,
@@ -52,6 +52,7 @@ function soldier(x = 0, z = 0, yaw = 0, seed = 7): Bot {
     burstLeft: 0,
     fireCooldown: 0,
     waypoint: null,
+    wpTime: 0,
     lastKnown: null,
     walkPhase: 0,
   };
@@ -67,7 +68,7 @@ function ctx(px: number, py: number, pz: number, over: Partial<BotCtx> = {}): Bo
   };
 }
 
-function run(b: Bot, c: BotCtx, e: SoldierEnv, seconds: number): BotEvent[] {
+function run(b: Bot, c: BotCtx, e: BotEnv, seconds: number): BotEvent[] {
   const events: BotEvent[] = [];
   for (let t = 0; t < seconds; t += DT) stepSoldier(b, c, e, DT, events);
   return events;
@@ -83,15 +84,23 @@ describe('soldier brain', () => {
     expect(b.state).toBe('engage');
   });
 
-  it('does not see the player outside the vision cone (behind)', () => {
+  it('does not notice a quiet, distant player behind it', () => {
     const b = soldier(0, 0, 0);
-    run(b, ctx(0, 2, 15), env(), 0.5); // directly behind a -Z-facing soldier
+    // behind a -Z-facing soldier, beyond rotorHearRange (18m)
+    run(b, ctx(0, 2, 25), env(), 0.5);
     expect(b.state).toBe('patrol');
   });
 
-  it('hears a player shot behind it and turns alert', () => {
+  it('hears the rotors of a player hovering close, even without a shot', () => {
     const b = soldier(0, 0, 0);
-    stepSoldier(b, ctx(0, 2, 15, { playerNoise: true }), env(), DT, []);
+    stepSoldier(b, ctx(0, 3, 10), env(), DT, []); // behind it, silent, 10m
+    expect(b.state).toBe('alert');
+    expect(b.lastKnown).not.toBeNull();
+  });
+
+  it('hears a player shot from further out and turns alert', () => {
+    const b = soldier(0, 0, 0);
+    stepSoldier(b, ctx(0, 2, 30, { playerNoise: true }), env(), DT, []);
     expect(b.state).toBe('alert');
     expect(b.lastKnown).not.toBeNull();
   });
@@ -152,6 +161,71 @@ describe('soldier brain', () => {
       const b = soldier(3, 4, 1, 99);
       const events = run(b, ctx(0, 2, -12), env(), 3);
       return { pos: b.pos.toArray(), yaw: b.yaw, shots: events.filter((e) => e.type === 'bot-shot').length };
+    };
+    expect(runOne()).toEqual(runOne());
+  });
+});
+
+const DR = TUNING.drone;
+
+function droneBot(x = 0, y = 6, z = 0, yaw = 0, seed = 21): Bot {
+  const b = soldier(x, z, yaw, seed);
+  b.kind = 'drone';
+  b.pos.set(x, y, z);
+  b.radius = DR.hitRadius;
+  b.hp = DR.hp;
+  return b;
+}
+
+function runDrone(b: Bot, c: BotCtx, e: BotEnv, seconds: number): BotEvent[] {
+  const events: BotEvent[] = [];
+  for (let t = 0; t < seconds; t += DT) stepDrone(b, c, e, DT, events);
+  return events;
+}
+
+describe('drone brain', () => {
+  it('spots the player all-round (no blind side) and engages', () => {
+    const b = droneBot(0, 6, 0, 0); // facing -Z; player BEHIND at +Z
+    const c = ctx(0, 5, 40);
+    runDrone(b, c, env(), DR.reactionS + 0.1);
+    expect(b.state).toBe('engage');
+  });
+
+  it('pursues into the engage band and keeps its distance while firing', () => {
+    const b = droneBot(0, 6, 0, 0);
+    const c = ctx(70, 4, 0); // far outside engageMax
+    const events = runDrone(b, c, env(), 12);
+    const horiz = Math.hypot(c.playerPos.x - b.pos.x, c.playerPos.z - b.pos.z);
+    expect(horiz).toBeLessThanOrEqual(DR.engageMax + 4);
+    expect(horiz).toBeGreaterThanOrEqual(DR.engageMin - 4);
+    expect(events.filter((e) => e.type === 'bot-shot').length).toBeGreaterThan(0);
+  });
+
+  it('steers back into its altitude band over the floor', () => {
+    const b = droneBot(0, 30, 0, 0); // spawned way above the band
+    runDrone(b, ctx(500, 5, 500), env(), 6); // player far — pure patrol
+    const agl = b.pos.y; // flat floor at 0
+    expect(agl).toBeLessThanOrEqual(DR.altMax + 0.5);
+    expect(agl).toBeGreaterThanOrEqual(DR.altMin - 0.5);
+  });
+
+  it('patrols between waypoints when unaware', () => {
+    const wp: { x: number; y: number; z: number }[] = [
+      { x: 30, y: 0, z: 0 }, { x: 0, y: 0, z: 30 }, { x: -30, y: 0, z: 0 },
+    ];
+    let i = 0;
+    const e = env(openWorld, { sampleWaypoint: () => wp[i++ % wp.length] });
+    const b = droneBot(0, 6, 0, 0);
+    const start = b.pos.clone();
+    runDrone(b, ctx(500, 5, 500), e, 6);
+    expect(b.pos.distanceTo(start)).toBeGreaterThan(10);
+  });
+
+  it('is deterministic: identical seeds → identical flight and shots', () => {
+    const runOne = () => {
+      const b = droneBot(5, 6, -5, 2, 77);
+      const events = runDrone(b, ctx(-20, 4, 10), env(), 5);
+      return { pos: b.pos.toArray(), shots: events.filter((e) => e.type === 'bot-shot').length };
     };
     expect(runOne()).toEqual(runOne());
   });

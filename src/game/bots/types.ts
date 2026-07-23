@@ -14,6 +14,34 @@ export const TUNING = {
     hitRadius: 0.35,
     respawnS: 10,
     hoverAlt: 5,
+    patrolSpeed: 6,
+    pursueSpeed: 10,
+    accel: 12,          // m/s² — kinematic steering clamp
+    altMin: 4,          // altitude band above the local floor
+    altMax: 8,
+    climbSpeed: 6,      // vertical correction rate back into the band
+    visionRange: 80,
+    fovRad: Math.PI * 2, // all-round camera — no blind side
+    hearRange: 50,
+    rotorHearRange: 25,
+    reactionS: 0.4,
+    aimErrBase: 0.08,
+    aimErrMin: 0.025,
+    aimTightenS: 2,
+    aimErrPerMeter: 0.0004,
+    aimErrPerSpeed: 0.004,
+    burstCount: 4,
+    burstInterval: 0.11,
+    burstPauseS: 0.9,
+    damage: 8,
+    yawSlewRad: 4,
+    fireConeRad: 0.25,
+    losLossToSeekS: 2,
+    alertStaleS: 3,
+    seekTimeoutS: 8,
+    engageMin: 15,      // orbit-strafe distance band while engaging
+    engageMax: 30,
+    orbitFlipS: 2.5,
   },
   soldier: {
     hp: 30,
@@ -27,6 +55,9 @@ export const TUNING = {
     visionRange: 60,
     fovRad: (120 * Math.PI) / 180,
     hearRange: 40,
+    /** The player's props are loud — heard through walls at close range even
+     *  without a shot, so hovering next to a soldier gets you noticed. */
+    rotorHearRange: 18,
     reactionS: 0.55,    // LOS acquire → first shot
     // aim error cone (half-angle, rad): tightens with continuous tracking,
     // widens with distance and target speed
@@ -75,6 +106,8 @@ export interface Bot extends ShotTarget {
   burstLeft: number;
   fireCooldown: number;
   waypoint: THREE.Vector3 | null;
+  /** Time spent on the current waypoint — unreachable ones get abandoned. */
+  wpTime: number;
   lastKnown: THREE.Vector3 | null;
   /** Render-only limb swing accumulator. */
   walkPhase: number;

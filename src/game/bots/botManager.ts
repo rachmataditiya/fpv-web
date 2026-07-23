@@ -14,8 +14,8 @@ import type { CollisionWorld } from '../../physics/quad';
 import type { ShotTarget } from '../weapon';
 import { mulberry32 } from '../rng';
 import { samplePoint } from './placement';
-import { stepSoldier } from './botBrain';
-import type { SoldierEnv } from './botBrain';
+import { stepDrone, stepSoldier } from './botBrain';
+import type { BotEnv } from './botBrain';
 import { PLAYER_SHOT_DAMAGE, TUNING } from './types';
 import type { Bot, BotCtx, BotDiedEvent, BotEvent, BotKind } from './types';
 
@@ -26,6 +26,9 @@ const SPAWN_CLEARANCE = 20;
 const BOT_SEPARATION = 8;
 /** Patrol waypoints only need to clear the immediate spawn area. */
 const WAYPOINT_CLEARANCE = 8;
+
+const _right = new THREE.Vector3();
+const _fwd = new THREE.Vector3();
 
 export class BotManager {
   readonly group = new THREE.Group();
@@ -41,7 +44,7 @@ export class BotManager {
   private bounds: { minX: number; maxX: number; minZ: number; maxZ: number };
   private avoid: THREE.Vector3;
   private strictFloor: ((x: number, z: number) => number | null) | null;
-  private env: SoldierEnv;
+  private env: BotEnv;
   private events: BotEvent[] = [];
 
   /** extraSpawns: the map's unused info_player_* points (bsp.spawns[1..]) —
@@ -109,6 +112,7 @@ export class BotManager {
         burstLeft: 0,
         fireCooldown: 0,
         waypoint: null,
+        wpTime: 0,
         lastKnown: null,
         walkPhase: 0,
       };
@@ -158,6 +162,7 @@ export class BotManager {
       }
       if (this.passive) continue;
       if (b.kind === 'soldier') stepSoldier(b, ctx, this.env, dt, this.events);
+      else stepDrone(b, ctx, this.env, dt, this.events);
     }
     return this.events;
   }
@@ -168,9 +173,11 @@ export class BotManager {
       const b = this.bots[i];
       if (!b.alive) continue;
       if (b.kind === 'drone') {
-        // dummy behavior until B1.6: hold position, watch the player
-        b.yaw = Math.atan2(-(playerPos.x - b.pos.x), -(playerPos.z - b.pos.z));
+        b.mesh.position.copy(b.pos);
         b.mesh.rotation.y = b.yaw;
+        // bank into the motion a touch — reads as flying, not floating
+        b.mesh.rotation.z = Math.max(-0.35, Math.min(0.35, -b.vel.dot(_right.set(-Math.cos(b.yaw), 0, Math.sin(b.yaw))) * 0.04));
+        b.mesh.rotation.x = Math.max(-0.35, Math.min(0.35, -b.vel.dot(_fwd.set(-Math.sin(b.yaw), 0, -Math.cos(b.yaw))) * 0.04));
         continue;
       }
       const feetY = b.pos.y - SOLDIER_HEIGHT / 2;
@@ -239,6 +246,7 @@ export class BotManager {
     b.burstLeft = 0;
     b.fireCooldown = 0;
     b.waypoint = null;
+    b.wpTime = 0;
     b.lastKnown = null;
     b.vel.set(0, 0, 0);
     b.yaw = yaw;
