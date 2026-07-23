@@ -21,6 +21,7 @@ import { loadMap } from './world/bsp/mapStore';
 import { saveProfile } from './input/profiles';
 import { Weapon } from './game/weapon';
 import { BarrelField, BARREL_BLAST_RADIUS } from './game/barrels';
+import { TargetRegistry } from './game/targetRegistry';
 import { FxSystem } from './render/fx';
 import { Sfx } from './audio/sfx';
 import { buildTrack, deleteTrackFor, exportTrackJson, fetchServerTrack, savedTrackFor, saveTrackFor } from './world/bsp/bspTracks';
@@ -119,6 +120,7 @@ let race: Race | null = track ? new Race(track, settings.bestLapMsByTrack[track.
 
 // combat (BSP maps get barrels; the weapon exists everywhere but needs targets)
 const weapon = new Weapon();
+const targetRegistry = new TargetRegistry();
 let barrels: BarrelField | null = null;
 const fx = new FxSystem(scene);
 const sfx = new Sfx();
@@ -242,8 +244,25 @@ if (bspName) {
           minX = Math.min(minX, g.positions[i]); maxX = Math.max(maxX, g.positions[i]);
           minZ = Math.min(minZ, g.positions[i + 2]); maxZ = Math.max(maxZ, g.positions[i + 2]);
         }
-      barrels = new BarrelField(world.collision, { minX, maxX, minZ, maxZ }, spawnCheckpoint.pos, 1337, world.geometryFloorAt);
-      scene.add(barrels.group);
+      const bf = new BarrelField(world.collision, { minX, maxX, minZ, maxZ }, spawnCheckpoint.pos, 1337, world.geometryFloorAt);
+      barrels = bf;
+      scene.add(bf.group);
+      targetRegistry.register({
+        get targets() { return bf.targets; },
+        onHit: (i) => {
+          const boomAt = bf.explode(i);
+          fx.explosion(boomAt);
+          sfx.explode();
+          flash(`BARREL ${bf.score}`, 700);
+          if (quad.pos.distanceTo(boomAt) < BARREL_BLAST_RADIUS) {
+            quad.crashed = true;
+            quad.crashTimer = params.respawnDelay;
+            quad.vel.set(0, 0, 0);
+            quad.thrust = 0;
+            flash('CAUGHT IN THE BLAST!');
+          }
+        },
+      });
 
       // race track: player-edited first, then the map folder's published
       // track.json. NOT auto-started — BSP maps default to WAR mode (free fly
@@ -557,25 +576,13 @@ const hooks = {
     if (quad.armed && !quad.crashed && input.held('shoot')) weapon.requestFire();
     _uptiltQ.setFromAxisAngle(_aimX, (settings.uptiltDeg * Math.PI) / 180);
     _aimQ.copy(quad.q).multiply(_uptiltQ);
-    const shot = weapon.tick(dt, quad.pos, _aimQ, collisionWorld, barrels?.targets ?? []);
+    const shot = weapon.tick(dt, quad.pos, _aimQ, collisionWorld, targetRegistry.collect());
     if (shot) {
       fx.tracer(shot.from, shot.to);
       fx.muzzle(shot.from);
       if (shot.hitWorld) fx.impact(shot.to);
       sfx.shoot();
-      if (shot.targetIndex !== null && barrels) {
-        const boomAt = barrels.explode(shot.targetIndex);
-        fx.explosion(boomAt);
-        sfx.explode();
-        flash(`BARREL ${barrels.score}`, 700);
-        if (quad.pos.distanceTo(boomAt) < BARREL_BLAST_RADIUS) {
-          quad.crashed = true;
-          quad.crashTimer = params.respawnDelay;
-          quad.vel.set(0, 0, 0);
-          quad.thrust = 0;
-          flash('CAUGHT IN THE BLAST!');
-        }
-      }
+      if (shot.targetIndex !== null) targetRegistry.dispatchHit(shot.targetIndex);
     }
     barrels?.tick(dt);
   },

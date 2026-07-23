@@ -5,6 +5,7 @@
  *  sweep); barrels are tested as bounding spheres — nearest hit wins. */
 import * as THREE from 'three';
 import type { CollisionWorld } from '../physics/quad';
+import { mulberry32 } from './rng';
 
 export const WEAPON_RANGE = 300;   // m
 export const WEAPON_COOLDOWN = 0.11; // s — ~9 rounds/s, rifle-like
@@ -33,16 +34,6 @@ const _to = new THREE.Vector3();
 const _rel = new THREE.Vector3();
 const _right = new THREE.Vector3();
 const _up = new THREE.Vector3();
-
-function mulberry32(a: number) {
-  return () => {
-    a |= 0;
-    a = (a + 0x6d2b79f5) | 0;
-    let t = Math.imul(a ^ (a >>> 15), 1 | a);
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-}
 
 export class Weapon {
   private cooldown = 0;

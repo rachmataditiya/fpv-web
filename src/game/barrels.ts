@@ -6,6 +6,7 @@ import * as THREE from 'three';
 import { createBarrelMesh, BARREL_RADIUS, BARREL_HEIGHT } from '../render/barrelMesh';
 import type { CollisionWorld } from '../physics/quad';
 import type { ShotTarget } from './weapon';
+import { mulberry32 } from './rng';
 
 const _sweepA = new THREE.Vector3();
 const _sweepB = new THREE.Vector3();
@@ -14,16 +15,6 @@ const RESPAWN_S = 10;
 const COUNT = 16;
 /** Blast radius that crashes a too-close drone. */
 export const BARREL_BLAST_RADIUS = 5;
-
-function mulberry32(a: number) {
-  return () => {
-    a |= 0;
-    a = (a + 0x6d2b79f5) | 0;
-    let t = Math.imul(a ^ (a >>> 15), 1 | a);
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-}
 
 interface Barrel extends ShotTarget {
   mesh: THREE.Group;
