@@ -1,5 +1,24 @@
 import * as THREE from 'three';
 
+/** Shared soft radial-gradient texture — untextured Sprites/Points render as
+ *  hard SQUARES; this makes every particle a feathered disc. */
+let _softTex: THREE.CanvasTexture | null = null;
+function softCircleTexture(): THREE.CanvasTexture {
+  if (_softTex) return _softTex;
+  const S = 64;
+  const c = document.createElement('canvas');
+  c.width = c.height = S;
+  const ctx = c.getContext('2d')!;
+  const g = ctx.createRadialGradient(S / 2, S / 2, 0, S / 2, S / 2, S / 2);
+  g.addColorStop(0, 'rgba(255,255,255,1)');
+  g.addColorStop(0.45, 'rgba(255,255,255,0.8)');
+  g.addColorStop(1, 'rgba(255,255,255,0)');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, S, S);
+  _softTex = new THREE.CanvasTexture(c);
+  return _softTex;
+}
+
 interface TracerSlot {
   line: THREE.Line;
   active: boolean;
@@ -19,6 +38,14 @@ interface ExplosionSlot {
   active: boolean;
   life: number;
   maxLife: number;
+  /** Vertical acceleration: −9.8 for debris/sparks, positive for buoyant smoke. */
+  accelY: number;
+}
+
+interface FireballSlot {
+  sprite: THREE.Sprite;
+  active: boolean;
+  life: number;
 }
 
 export class FxSystem {
@@ -36,6 +63,14 @@ export class FxSystem {
   private impactSlots: ExplosionSlot[] = [];
   private impactIdx = 0;
   private impactSize = 8;
+  private fireballSlots: FireballSlot[] = [];
+  private fireballIdx = 0;
+  private smokeSlots: ExplosionSlot[] = [];
+  private smokeIdx = 0;
+  private sparkSlots: ExplosionSlot[] = [];
+  private sparkIdx = 0;
+  private puffSlots: ExplosionSlot[] = [];
+  private puffIdx = 0;
   private particleSlots: ExplosionSlot[] = []; // explosions + impacts, combined once
 
   constructor(scene: THREE.Scene) {
@@ -44,7 +79,93 @@ export class FxSystem {
     this.initMuzzles();
     this.initExplosions();
     this.initImpacts();
-    this.particleSlots = [...this.explosionSlots, ...this.impactSlots];
+    this.initFireballs();
+    this.smokeSlots = this.makeParticlePool(4, 24, 0x2e2a26, 1.7, 1.8, THREE.NormalBlending);
+    this.sparkSlots = this.makeParticlePool(8, 6, 0xffe9a8, 0.07, 0.16, THREE.AdditiveBlending);
+    this.puffSlots = this.makeParticlePool(8, 4, 0x8a8a8a, 0.14, 0.55, THREE.NormalBlending);
+    this.particleSlots = [
+      ...this.explosionSlots, ...this.impactSlots,
+      ...this.smokeSlots, ...this.sparkSlots, ...this.puffSlots,
+    ];
+  }
+
+  /** Generic pooled Points builder for the small effects. */
+  private makeParticlePool(
+    slots: number,
+    particles: number,
+    color: number,
+    size: number,
+    maxLife: number,
+    blending: THREE.Blending,
+  ): ExplosionSlot[] {
+    const out: ExplosionSlot[] = [];
+    for (let i = 0; i < slots; i++) {
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute('position', new THREE.Float32BufferAttribute(new Float32Array(particles * 3), 3));
+      const mat = new THREE.PointsMaterial({
+        map: softCircleTexture(),
+        color, size, blending,
+        sizeAttenuation: true, transparent: true, depthWrite: false,
+        alphaTest: 0.02,
+      });
+      const points = new THREE.Points(geo, mat);
+      points.visible = false;
+      this.scene.add(points);
+      out.push({
+        points,
+        positions: geo.attributes.position as THREE.BufferAttribute,
+        velocities: new Float32Array(particles * 3),
+        active: false, life: 0, maxLife, accelY: -9.8,
+      });
+    }
+    return out;
+  }
+
+  private initFireballs() {
+    for (let i = 0; i < 4; i++) {
+      const mat = new THREE.SpriteMaterial({
+        map: softCircleTexture(),
+        color: 0xff5a1a,
+        blending: THREE.AdditiveBlending,
+        transparent: true,
+        depthWrite: false,
+      });
+      const sprite = new THREE.Sprite(mat);
+      sprite.visible = false;
+      this.scene.add(sprite);
+      this.fireballSlots.push({ sprite, active: false, life: 0 });
+    }
+  }
+
+  /** Spawn helper: scatter a pooled Points slot at pos with random velocities. */
+  private burst(
+    pool: ExplosionSlot[], idx: number, pos: THREE.Vector3,
+    speedMin: number, speedMax: number, upBias: number, accelY: number, opacity = 1,
+  ): number {
+    const slot = pool[idx];
+    const next = (idx + 1) % pool.length;
+    slot.active = true;
+    slot.life = slot.maxLife;
+    slot.accelY = accelY;
+    slot.points.visible = true;
+    slot.points.position.copy(pos);
+    const posArr = slot.positions.array as Float32Array;
+    const velArr = slot.velocities;
+    const count = posArr.length / 3;
+    for (let i = 0; i < count; i++) {
+      const i3 = i * 3;
+      posArr[i3] = 0; posArr[i3 + 1] = 0; posArr[i3 + 2] = 0;
+      const phi = Math.random() * Math.PI * upBias;
+      const theta = Math.random() * Math.PI * 2;
+      const speed = speedMin + Math.random() * (speedMax - speedMin);
+      velArr[i3] = speed * Math.sin(phi) * Math.cos(theta);
+      velArr[i3 + 1] = speed * Math.cos(phi);
+      velArr[i3 + 2] = speed * Math.sin(phi) * Math.sin(theta);
+    }
+    // particles are LOCAL to the slot (slot origin = pos) — reset attr each spawn
+    slot.positions.needsUpdate = true;
+    (slot.points.material as THREE.PointsMaterial).opacity = opacity;
+    return next;
   }
 
   private initTracers() {
@@ -67,6 +188,7 @@ export class FxSystem {
   private initMuzzles() {
     for (let i = 0; i < this.muzzleSize; i++) {
       const mat = new THREE.SpriteMaterial({
+        map: softCircleTexture(),
         color: 0xffc46b,
         blending: THREE.AdditiveBlending,
         transparent: true,
@@ -88,6 +210,7 @@ export class FxSystem {
       const geo = new THREE.BufferGeometry();
       geo.setAttribute('position', new THREE.Float32BufferAttribute(positionsArr, 3));
       const mat = new THREE.PointsMaterial({
+        map: softCircleTexture(),
         color: 0xff9540,
         blending: THREE.AdditiveBlending,
         size: 0.35,
@@ -105,6 +228,7 @@ export class FxSystem {
         active: false,
         life: 0,
         maxLife: 0.7,
+        accelY: -9.8,
       });
     }
   }
@@ -117,6 +241,7 @@ export class FxSystem {
       const geo = new THREE.BufferGeometry();
       geo.setAttribute('position', new THREE.Float32BufferAttribute(positionsArr, 3));
       const mat = new THREE.PointsMaterial({
+        map: softCircleTexture(),
         color: 0xd8c7a4,
         size: 0.12,
         sizeAttenuation: true,
@@ -133,6 +258,7 @@ export class FxSystem {
         active: false,
         life: 0,
         maxLife: 0.35,
+        accelY: -9.8,
       });
     }
   }
@@ -150,7 +276,7 @@ export class FxSystem {
     const count = posArr.length / 3;
     for (let i = 0; i < count; i++) {
       const i3 = i * 3;
-      posArr[i3] = pos.x; posArr[i3 + 1] = pos.y; posArr[i3 + 2] = pos.z;
+      posArr[i3] = 0; posArr[i3 + 1] = 0; posArr[i3 + 2] = 0; // local coords
       const phi = Math.random() * Math.PI * 0.6;
       const theta = Math.random() * Math.PI * 2;
       const speed = 1 + Math.random() * 4;
@@ -184,6 +310,10 @@ export class FxSystem {
     slot.sprite.position.copy(pos);
     slot.sprite.scale.set(0.5, 0.5, 0.5);
     (slot.sprite.material as THREE.SpriteMaterial).opacity = 1;
+
+    // muzzle sparks (fast, tiny, hot) + a wisp of smoke drifting up
+    this.sparkIdx = this.burst(this.sparkSlots, this.sparkIdx, pos, 2, 7, 1.0, -9.8, 1);
+    this.puffIdx = this.burst(this.puffSlots, this.puffIdx, pos, 0.2, 0.9, 0.4, 0.9, 0.4);
   }
 
   explosion(pos: THREE.Vector3) {
@@ -196,12 +326,13 @@ export class FxSystem {
     const posArr = slot.positions.array as Float32Array;
     const velArr = slot.velocities;
     const count = posArr.length / 3;
-    // set all particles to spawn position, random velocity with upward bias
+    // particles are LOCAL to the slot (points.position carries the world pos —
+    // writing world coords here too would double the offset)
     for (let i = 0; i < count; i++) {
       const i3 = i * 3;
-      posArr[i3] = pos.x;
-      posArr[i3 + 1] = pos.y;
-      posArr[i3 + 2] = pos.z;
+      posArr[i3] = 0;
+      posArr[i3 + 1] = 0;
+      posArr[i3 + 2] = 0;
       // random unit vector, upward hemispherical (y positive)
       const phi = Math.random() * Math.PI * 0.5; // [0, PI/2]
       const theta = Math.random() * Math.PI * 2;
@@ -212,6 +343,19 @@ export class FxSystem {
     }
     slot.positions.needsUpdate = true;
     (slot.points.material as THREE.PointsMaterial).opacity = 1;
+
+    // fireball flash: big additive sprite ballooning out
+    const fb = this.fireballSlots[this.fireballIdx];
+    this.fireballIdx = (this.fireballIdx + 1) % this.fireballSlots.length;
+    fb.active = true;
+    fb.life = 0.3;
+    fb.sprite.visible = true;
+    fb.sprite.position.copy(pos);
+    fb.sprite.scale.set(1, 1, 1);
+    (fb.sprite.material as THREE.SpriteMaterial).opacity = 1;
+
+    // rising smoke plume (buoyant, long-lived)
+    this.smokeIdx = this.burst(this.smokeSlots, this.smokeIdx, pos, 0.6, 3.2, 0.45, 1.6, 0.7);
   }
 
   update(dt: number) {
@@ -241,6 +385,21 @@ export class FxSystem {
       }
     }
 
+    // Fireballs: balloon out fast, fade
+    for (const fb of this.fireballSlots) {
+      if (!fb.active) continue;
+      fb.life -= dt;
+      if (fb.life <= 0) {
+        fb.active = false;
+        fb.sprite.visible = false;
+      } else {
+        const t = 1 - fb.life / 0.3;                 // 0 → 1
+        const scale = 1 + t * 7;                     // 1 m → 8 m across
+        fb.sprite.scale.set(scale, scale, scale);
+        (fb.sprite.material as THREE.SpriteMaterial).opacity = (1 - t) * (1 - t);
+      }
+    }
+
     // Explosions + impact puffs (same particle update)
     for (const slot of this.particleSlots) {
       if (!slot.active) continue;
@@ -257,7 +416,7 @@ export class FxSystem {
           posArr[i3] += velArr[i3] * dt;
           posArr[i3 + 1] += velArr[i3 + 1] * dt;
           posArr[i3 + 2] += velArr[i3 + 2] * dt;
-          velArr[i3 + 1] -= 9.8 * dt; // gravity
+          velArr[i3 + 1] += slot.accelY * dt; // gravity or smoke buoyancy
         }
         slot.positions.needsUpdate = true;
         // opacity fades to 0 during last 60% of lifetime
