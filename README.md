@@ -102,7 +102,7 @@ All tuning constants are defined in `src/physics/params.ts`. Adjust mass, thrust
 
 ## Contributing
 
-FPV Web is MIT-licensed and open to contributions — maps and tracks, physics tuning, input devices, UI, and the upcoming **multiplayer drone combat** milestone. Start with [CONTRIBUTING.md](CONTRIBUTING.md) and the [Game Development Life Cycle](docs/GDLC.md) for how the project is built and where to plug in. Community map submissions welcome via the map-submission issue template (freely-redistributable map files only).
+FPV Web is MIT-licensed and open to contributions — maps and tracks, physics tuning, input devices, UI, and the active **multiplayer drone combat** roadmap ([RFC 0001](docs/rfcs/0001-multiplayer.md) · [milestones](https://github.com/rachmataditiya/fpv-web/milestones)): CS-style rooms with join codes, deathmatch, and a bomb/defuse "Drone Strike" mode on dust2. Start with [CONTRIBUTING.md](CONTRIBUTING.md) and the [Game Development Life Cycle](docs/GDLC.md) for how the project is built and where to plug in. Community map submissions welcome via the map-submission issue template (freely-redistributable map files only).
 
 ## License
 

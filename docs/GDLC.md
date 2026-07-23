@@ -106,3 +106,12 @@ Every feature moves from idea to code to live game in a continuous loop.
 ## 6. Contributing
 
 Please read [CONTRIBUTING.md](../CONTRIBUTING.md) for coding style, commit conventions, and the pull request process. All contributions must align with the lifecycle described here.
+
+## Multiplayer roadmap (active)
+
+The next major arc is **CS-style drone combat** — design in
+[RFC 0001](rfcs/0001-multiplayer.md), work broken into the
+[`multiplayer` milestone series](https://github.com/rachmataditiya/fpv-web/milestones)
+(MP1 Netcode foundations → MP2 Shared skies → MP3 Combat MVP → MP4 Modes &
+rounds → MP5 Drone Strike → MP6 Feel & scale). Every issue carries acceptance
+criteria — pick one from the earliest open milestone.
