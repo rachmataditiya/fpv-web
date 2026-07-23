@@ -28,6 +28,10 @@ export interface HudData {
   message: string | null;
   /** Barrels destroyed (null = no shooting on this map). */
   score: number | null;
+  /** Player hit points (null = no bot combat on this map → combat HUD hidden). */
+  hp: number | null;
+  /** Bots destroyed (null = no bots on this map). */
+  kills: number | null;
 }
 
 function fmtMs(ms: number): string {
@@ -93,6 +97,27 @@ const CSS = `
   display:none;align-items:center;gap:7px;padding:6px 14px;border-radius:8px;
   background:rgba(11,14,20,.55);border:1px solid rgba(44,55,80,.55)}
 .hud-score .n{font-size:16px;font-weight:700;color:var(--amber)}
+.hud-score .sep{color:var(--mut);font-size:12px}
+
+/* ---- integrity (player hp, above the throttle column) ---- */
+.hud-hp{position:absolute;left:16px;bottom:248px;display:none;flex-direction:column;gap:5px;
+  padding:6px 10px;border-radius:8px;background:rgba(11,14,20,.55);
+  border:1px solid rgba(44,55,80,.55);width:max-content}
+.hud-hp .row{display:flex;align-items:baseline;gap:8px}
+.hud-hp .n{font-size:15px;font-weight:600;color:var(--green)}
+.hud-hp .track{width:90px;height:6px;border-radius:3px;background:rgba(233,238,244,.12);
+  overflow:hidden}
+.hud-hp .fill{height:100%;width:100%;background:var(--green);transition:width .15s}
+.hud-hp.mid .n{color:var(--amber)}
+.hud-hp.mid .fill{background:var(--amber)}
+.hud-hp.low .n{color:var(--warn)}
+.hud-hp.low .fill{background:var(--warn)}
+
+/* ---- damage vignette (flashed imperatively via pulseDamage) ---- */
+.hud-dmg{position:absolute;inset:0;pointer-events:none;opacity:0;
+  box-shadow:inset 0 0 120px 30px rgba(255,40,40,.55)}
+.hud-dmg.on{animation:huddmg .5s ease-out}
+@keyframes huddmg{from{opacity:1}to{opacity:0}}
 
 /* ---- center overlays ---- */
 .hud-count{position:absolute;top:38%;left:50%;transform:translate(-50%,-50%);
@@ -129,6 +154,13 @@ export class Hud {
   private msgEl: HTMLDivElement;
   private scoreEl: HTMLDivElement;
   private scoreNEl: HTMLSpanElement;
+  private killSepEl: HTMLSpanElement;
+  private killLblEl: HTMLSpanElement;
+  private killsNEl: HTMLSpanElement;
+  private hpEl: HTMLDivElement;
+  private hpNEl: HTMLSpanElement;
+  private hpFillEl: HTMLDivElement;
+  private dmgEl: HTMLDivElement;
 
   private prev = {
     armed: null as boolean | null,
@@ -145,6 +177,8 @@ export class Hud {
     countdown: '' as string,
     message: null as string | null,
     score: null as number | null,
+    hp: NaN as number | null,
+    kills: NaN as number | null,
   };
 
   constructor(mount: HTMLElement) {
@@ -183,7 +217,12 @@ export class Hud {
         <div class="alt mono"><span class="lbl">alt</span> <b data-r="alt">0</b> m</div>
       </div>
       <div class="hud-horizon"><canvas width="220" height="220" data-r="horizon"></canvas></div>
-      <div class="hud-score mono" data-r="score"><span class="lbl">barrels</span><span class="n" data-r="scoren">0</span></div>
+      <div class="hud-dmg" data-r="dmg"></div>
+      <div class="hud-hp mono" data-r="hp">
+        <div class="row"><span class="lbl">integrity</span><span class="n" data-r="hpn">100</span></div>
+        <div class="track"><div class="fill" data-r="hpfill"></div></div>
+      </div>
+      <div class="hud-score mono" data-r="score"><span class="lbl">barrels</span><span class="n" data-r="scoren">0</span><span class="sep" data-r="killsep">·</span><span class="lbl" data-r="killlbl">kills</span><span class="n" data-r="killsn">0</span></div>
       <div class="hud-count mono" data-r="count"></div>
       <div class="hud-msg" data-r="msg"></div>`;
     mount.appendChild(this.container);
@@ -204,6 +243,13 @@ export class Hud {
     this.msgEl = $('msg');
     this.scoreEl = $('score');
     this.scoreNEl = $('scoren');
+    this.killSepEl = $('killsep');
+    this.killLblEl = $('killlbl');
+    this.killsNEl = $('killsn');
+    this.hpEl = $('hp');
+    this.hpNEl = $('hpn');
+    this.hpFillEl = $('hpfill');
+    this.dmgEl = $('dmg');
     this.horizonCanvas = this.container.querySelector('[data-r="horizon"]') as HTMLCanvasElement;
     this.horizonCtx = this.horizonCanvas.getContext('2d')!;
   }
@@ -284,6 +330,24 @@ export class Hud {
       this.scoreEl.style.display = d.score !== null ? 'flex' : 'none';
       if (d.score !== null) this.scoreNEl.textContent = String(d.score);
     }
+    if (p.kills !== d.kills) {
+      p.kills = d.kills;
+      const show = d.kills !== null ? '' : 'none';
+      this.killSepEl.style.display = show;
+      this.killLblEl.style.display = show;
+      this.killsNEl.style.display = show;
+      if (d.kills !== null) this.killsNEl.textContent = String(d.kills);
+    }
+    if (p.hp !== d.hp) {
+      p.hp = d.hp;
+      this.hpEl.style.display = d.hp !== null ? 'flex' : 'none';
+      if (d.hp !== null) {
+        this.hpNEl.textContent = String(Math.round(d.hp));
+        this.hpFillEl.style.width = `${Math.max(0, Math.min(100, d.hp))}%`;
+        this.hpEl.classList.toggle('low', d.hp < 25);
+        this.hpEl.classList.toggle('mid', d.hp >= 25 && d.hp <= 60);
+      }
+    }
 
     this.drawHorizon(d.rollRad, d.pitchRad);
 
@@ -304,6 +368,14 @@ export class Hud {
         this.msgEl.style.display = 'none';
       }
     }
+  }
+
+  /** Flash the red damage vignette (imperative — restarting the CSS animation
+   *  avoids threading a decay timestamp through HudData). */
+  pulseDamage(): void {
+    this.dmgEl.classList.remove('on');
+    void this.dmgEl.offsetWidth; // reflow restarts the animation
+    this.dmgEl.classList.add('on');
   }
 
   /** Artificial horizon: translucent sky/ground rotated by −roll, pitch ladder

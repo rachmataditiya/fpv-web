@@ -22,6 +22,7 @@ import { saveProfile } from './input/profiles';
 import { Weapon } from './game/weapon';
 import { BarrelField, BARREL_BLAST_RADIUS } from './game/barrels';
 import { TargetRegistry } from './game/targetRegistry';
+import { PlayerHealth } from './game/playerHealth';
 import { FxSystem } from './render/fx';
 import { Sfx } from './audio/sfx';
 import { buildTrack, deleteTrackFor, exportTrackJson, fetchServerTrack, savedTrackFor, saveTrackFor } from './world/bsp/bspTracks';
@@ -121,6 +122,7 @@ let race: Race | null = track ? new Race(track, settings.bestLapMsByTrack[track.
 // combat (BSP maps get barrels; the weapon exists everywhere but needs targets)
 const weapon = new Weapon();
 const targetRegistry = new TargetRegistry();
+const playerHealth = new PlayerHealth(100);
 let barrels: BarrelField | null = null;
 const fx = new FxSystem(scene);
 const sfx = new Sfx();
@@ -192,6 +194,7 @@ function startBspRace(t: TrackDef): void {
 
 function respawn(): void {
   resetQuad(quad, checkpoint().pos, checkpoint().yawDeg, 0.5);
+  playerHealth.reset();
 }
 
 function restartRace(): void {
@@ -545,6 +548,8 @@ const hudData: HudData = {
   countdown: null,
   message: null,
   score: null,
+  hp: null,
+  kills: null,
 };
 
 const _e = new THREE.Euler();
