@@ -242,7 +242,7 @@ if (bspName) {
           minX = Math.min(minX, g.positions[i]); maxX = Math.max(maxX, g.positions[i]);
           minZ = Math.min(minZ, g.positions[i + 2]); maxZ = Math.max(maxZ, g.positions[i + 2]);
         }
-      barrels = new BarrelField(world.collision, { minX, maxX, minZ, maxZ }, spawnCheckpoint.pos);
+      barrels = new BarrelField(world.collision, { minX, maxX, minZ, maxZ }, spawnCheckpoint.pos, 1337, world.geometryFloorAt);
       scene.add(barrels.group);
 
       // race track: player-edited first, then the map folder's published

@@ -17,6 +17,9 @@ THREE.Mesh.prototype.raycast = acceleratedRaycast;
 export interface BspWorld {
   group: THREE.Group;
   collision: CollisionWorld;
+  /** Floor height from REAL BSP geometry only — null when (x,z) is outside the
+   *  map's actual footprint (no base-ground fallback). For object placement. */
+  geometryFloorAt(x: number, z: number): number | null;
 }
 
 /** Fallback for textures whose WAD wasn't supplied: quiet warm plaster with a
@@ -162,5 +165,13 @@ export function buildBspWorld(bsp: ParsedBsp): BspWorld {
     },
   };
 
-  return { group, collision };
+  const geometryFloorAt = (x: number, z: number): number | null => {
+    _origin.set(x, 500, z);
+    ray.set(_origin, _down);
+    ray.far = 2000;
+    const hit = ray.intersectObject(collMesh, false)[0];
+    return hit ? hit.point.y : null;
+  };
+
+  return { group, collision, geometryFloorAt };
 }

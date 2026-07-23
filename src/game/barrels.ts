@@ -7,6 +7,9 @@ import { createBarrelMesh, BARREL_RADIUS, BARREL_HEIGHT } from '../render/barrel
 import type { CollisionWorld } from '../physics/quad';
 import type { ShotTarget } from './weapon';
 
+const _sweepA = new THREE.Vector3();
+const _sweepB = new THREE.Vector3();
+
 const RESPAWN_S = 10;
 const COUNT = 16;
 /** Blast radius that crashes a too-close drone. */
@@ -36,14 +39,20 @@ export class BarrelField {
   private avoid: THREE.Vector3;
   score = 0;
 
-  /** bounds = horizontal extent of the BSP geometry; avoid = spawn point. */
+  private strictFloor: ((x: number, z: number) => number | null) | null;
+
+  /** bounds = horizontal extent of the BSP geometry; avoid = spawn point.
+   *  strictFloor: geometry-only sampler (no base-ground fallback) so barrels
+   *  never spawn outside the map footprint. */
   constructor(
     world: CollisionWorld,
     bounds: { minX: number; maxX: number; minZ: number; maxZ: number },
     avoid: THREE.Vector3,
     seed = 1337,
+    strictFloor: ((x: number, z: number) => number | null) | null = null,
   ) {
     this.world = world;
+    this.strictFloor = strictFloor;
     this.bounds = bounds;
     this.avoid = avoid.clone();
     this.rng = mulberry32(seed);
@@ -66,15 +75,29 @@ export class BarrelField {
   /** Find a floor spot for the barrel; keep it dead if none found this try. */
   private place(b: Barrel): void {
     const { minX, maxX, minZ, maxZ } = this.bounds;
+    const floor = (x: number, z: number) =>
+      this.strictFloor ? this.strictFloor(x, z) : this.world.floorAt(x, 200, z);
     for (let tries = 0; tries < 24; tries++) {
       const x = minX + this.rng() * (maxX - minX);
       const z = minZ + this.rng() * (maxZ - minZ);
-      const y = this.world.floorAt(x, 200, z);
-      if (y === null) continue;
+      const y = floor(x, z);
+      if (y === null) continue; // outside the map footprint
       if ((x - this.avoid.x) ** 2 + (z - this.avoid.z) ** 2 < 8 ** 2) continue; // clear of spawn
-      // reject spots under very low ceilings (inside solid/clip areas)
-      const head = this.world.floorAt(x, y + 0.1 + BARREL_HEIGHT, z);
-      if (head !== null && head > y + 0.05) continue;
+      // FLAT footprint: the floor under all four rim points must match the
+      // center — rejects wall tops, stair edges, and slopes.
+      const r = BARREL_RADIUS;
+      let flat = true;
+      for (const [dx, dz] of [[r, 0], [-r, 0], [0, r], [0, -r]]) {
+        const fy = floor(x + dx, z + dz);
+        if (fy === null || Math.abs(fy - y) > 0.3) { flat = false; break; }
+      }
+      if (!flat) continue;
+      // headroom: nothing between the barrel base and its top + margin
+      if (this.world.sweep) {
+        _sweepA.set(x, y + 0.05, z);
+        _sweepB.set(x, y + BARREL_HEIGHT + 0.4, z);
+        if (this.world.sweep(_sweepA, _sweepB)) continue; // ceiling too low / inside solid
+      }
       b.pos.set(x, y + BARREL_HEIGHT / 2, z); // sphere center at mid-height
       b.mesh.position.set(x, y, z);
       b.mesh.rotation.y = this.rng() * Math.PI * 2;
