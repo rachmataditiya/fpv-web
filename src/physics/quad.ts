@@ -68,6 +68,8 @@ const _dq = new THREE.Quaternion();
 const _axis = new THREE.Vector3();
 const _prev = new THREE.Vector3();
 const _n = new THREE.Vector3();
+const _d = new THREE.Vector3();
+const _segStart = new THREE.Vector3();
 
 /** One fixed physics step. Returns true if this step ended in a new crash. */
 export function stepQuad(s: QuadState, input: FlightInput, p: QuadParams, dt: number, world?: CollisionWorld): boolean {
@@ -118,12 +120,26 @@ export function stepQuad(s: QuadState, input: FlightInput, p: QuadParams, dt: nu
   // motion. ALWAYS active — a disarmed quad falls at up to ~30 m/s (12+ cm per
   // 240 Hz step), which tunnels straight through floorAt's small ray margin, so
   // the sweep is what keeps a falling drone on top of map geometry. Arming only
-  // decides whether a hard hit counts as a crash. ---
+  // decides whether a hard hit counts as a crash.
+  //
+  // ITERATIVE + EXTENDED: a single point-cast per tick tunnels in two ways —
+  // (1) corner push-out can land inside the adjacent brush, so the next tick's
+  // segment starts INSIDE solid and DoubleSide finds the exit face first;
+  // (2) a segment that starts exactly on a touched wall can slide through at
+  // grazing angles. So: start the cast one drone-radius BEHIND the motion, pin
+  // the normal against the motion direction (not the velocity, which earlier
+  // iterations may have altered), and resolve up to 3 hits per tick. ---
   if (world?.sweep) {
-    const hit = world.sweep(_prev, s.pos);
-    if (hit) {
+    for (let iter = 0; iter < 3; iter++) {
+      _d.subVectors(s.pos, _prev);
+      const seg = _d.length();
+      if (seg < 1e-9) break;
+      _d.multiplyScalar(1 / seg);
+      _segStart.copy(_prev).addScaledVector(_d, -p.size);
+      const hit = world.sweep(_segStart, s.pos);
+      if (!hit) break;
       _n.copy(hit.normal);
-      if (_n.dot(s.vel) > 0) _n.negate(); // face the incoming velocity
+      if (_n.dot(_d) > 0) _n.negate(); // face against the motion
       const impact = -s.vel.dot(_n);
       if (impact > p.crashSpeed && s.armed) {
         s.pos.copy(hit.point).addScaledVector(_n, p.size);
@@ -137,9 +153,10 @@ export function stepQuad(s: QuadState, input: FlightInput, p: QuadParams, dt: nu
       }
       // glancing hit (or any disarmed hit): push out, kill the normal
       // component, damp the rest — dead drones settle instead of clipping.
-      s.pos.copy(hit.point).addScaledVector(_n, p.size);
-      s.vel.addScaledVector(_n, impact * (s.armed ? 1.25 : 1.05)); // remove + tiny bounce
-      s.vel.multiplyScalar(s.armed ? 0.85 : 0.5);
+      s.pos.copy(hit.point).addScaledVector(_n, p.size * 1.05);
+      if (impact > 0) s.vel.addScaledVector(_n, impact * (s.armed ? 1.25 : 1.05));
+      s.vel.multiplyScalar(s.armed ? 0.9 : 0.6);
+      _prev.copy(hit.point).addScaledVector(_n, p.size * 1.05); // re-check from the corrected point
     }
   }
 

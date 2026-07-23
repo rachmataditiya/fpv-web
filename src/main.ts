@@ -126,6 +126,8 @@ const sfx = new Sfx();
 // track editor (BSP maps)
 let editingTrack = false;
 let editorGates: GateDef[] = [];
+/** BSP maps: a track that exists but hasn't been started (war mode default). */
+let pendingBspTrack: TrackDef | null = null;
 const spawnCheckpoint = {
   pos: new THREE.Vector3(...mapDef.spawn.pos),
   yawDeg: mapDef.spawn.yawDeg,
@@ -192,6 +194,13 @@ function respawn(): void {
 
 function restartRace(): void {
   if (!race) {
+    // war mode with a track waiting → the restart button STARTS the race
+    if (pendingBspTrack) {
+      startBspRace(pendingBspTrack);
+      respawn();
+      flash('RACE ON!', 1200);
+      return;
+    }
     respawn();
     return;
   }
@@ -236,16 +245,15 @@ if (bspName) {
       barrels = new BarrelField(world.collision, { minX, maxX, minZ, maxZ }, spawnCheckpoint.pos);
       scene.add(barrels.group);
 
-      // race track: player-edited first, then the map folder's published track.json
-      let bspTrack = savedTrackFor(rawMap);
-      if (!bspTrack && serverName) {
+      // race track: player-edited first, then the map folder's published
+      // track.json. NOT auto-started — BSP maps default to WAR mode (free fly
+      // + barrels); the restart button starts the race when wanted.
+      pendingBspTrack = savedTrackFor(rawMap);
+      if (!pendingBspTrack && serverName) {
         const sm = (await listServerMaps()).find((m) => m.name === serverName);
-        if (sm?.trackUrl) bspTrack = await fetchServerTrack(sm.trackUrl);
+        if (sm?.trackUrl) pendingBspTrack = await fetchServerTrack(sm.trackUrl);
       }
-      if (bspTrack) {
-        startBspRace(bspTrack);
-        flash('RACE TRACK LOADED', 1200);
-      }
+      if (pendingBspTrack) flash('WAR MODE — RESTART BUTTON STARTS THE RACE', 2500);
       if (bsp.missingTextures.length)
         flash(`${bsp.missingTextures.length} TEXTURES NEED WADS`, 3000);
       else flash(bspName.toUpperCase(), 1500);
@@ -438,13 +446,16 @@ function toggleTrackEditor(): void {
         yawDeg: spawnCheckpoint.yawDeg,
       });
       saveTrackFor(rawMap, t);
+      pendingBspTrack = t;
       startBspRace(t);
       flash(`TRACK SAVED — ${editorGates.length} GATES, RACE ON`, 2000);
     } else if (editorGates.length === 0) {
       deleteTrackFor(rawMap);
+      pendingBspTrack = null;
+      race = null;
       gates?.group.removeFromParent();
       gates = null;
-      flash('TRACK CLEARED — FREE FLY', 1500);
+      flash('TRACK CLEARED — WAR MODE', 1500);
     } else {
       flash('NEED ≥2 GATES — NOT SAVED', 2000);
     }
