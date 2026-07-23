@@ -39,6 +39,16 @@ const _desired = new THREE.Vector3();
 const _dv = new THREE.Vector3();
 const _next = new THREE.Vector3();
 const _n = new THREE.Vector3();
+const _probeA = new THREE.Vector3();
+const _probeB = new THREE.Vector3();
+
+/** Gap drones keep to walls — sized to the 3× enemy-drone mesh (~0.56m
+ *  half-span) so props never visually poke through geometry. */
+const DRONE_CLEARANCE = 0.75;
+/** How far ahead a flying drone probes to deflect along walls early. */
+const LOOKAHEAD_M = 2.5;
+/** Soldiers' shoulder margin against walls while walking. */
+const SOLDIER_WALL_MARGIN = 0.35;
 
 /** Yaw whose facing vector (−sin yaw, −cos yaw) points along (dx, dz). */
 export function yawToward(dx: number, dz: number): number {
@@ -64,6 +74,23 @@ function yawErrTo(yaw: number, target: number): number {
 function setState(b: Bot, s: Bot['state']): void {
   b.state = s;
   b.stateTime = 0;
+}
+
+/** Pick a patrol waypoint, preferring one with a straight-line sweep clear
+ *  from `fromY` height — bots stop marching head-first into walls. Up to 3
+ *  candidates per call; the first is kept as fallback so patrol never stalls. */
+function pickWaypoint(b: Bot, env: BotEnv, fromY: number): { x: number; y: number; z: number } | null {
+  let fallback: { x: number; y: number; z: number } | null = null;
+  for (let i = 0; i < 3; i++) {
+    const c = env.sampleWaypoint();
+    if (!c) continue;
+    fallback = fallback ?? c;
+    if (!env.world.sweep) return c;
+    _probeA.set(b.pos.x, fromY, b.pos.z);
+    _probeB.set(c.x, fromY, c.z);
+    if (!env.world.sweep(_probeA, _probeB)) return c; // reachable-ish — take it
+  }
+  return fallback;
 }
 
 function updateSenses(
@@ -118,7 +145,10 @@ function fireAt(
 
 // ---------------------------------------------------------------- soldier ---
 
-/** Walk toward (tx, tz); returns false when blocked by a ledge/step/off-map. */
+/** Walk toward (tx, tz); returns false when blocked by a ledge, a step, the
+ *  map edge, or a wall. The chest-height wall sweep (with shoulder margin)
+ *  keeps the mesh visually out of geometry — floor sampling alone lets a
+ *  soldier hug a wall until its shoulders clip through. */
 function moveGround(b: Bot, tx: number, tz: number, speed: number, dt: number, env: BotEnv): boolean {
   const dx = tx - b.pos.x;
   const dz = tz - b.pos.z;
@@ -130,6 +160,18 @@ function moveGround(b: Bot, tx: number, tz: number, speed: number, dt: number, e
   const curFloor = b.pos.y - S.height / 2;
   const floor = env.floorAt(nx, nz);
   if (floor === null || Math.abs(floor - curFloor) > S.maxStepUp) return false;
+  if (env.world.sweep) {
+    const chestY = curFloor + 1.0;
+    _probeA.set(b.pos.x, chestY, b.pos.z);
+    _probeB.set(nx + (dx / d) * SOLDIER_WALL_MARGIN, chestY, nz + (dz / d) * SOLDIER_WALL_MARGIN);
+    if (env.world.sweep(_probeA, _probeB)) return false; // wall ahead
+    // shoulder probes: grazing past a corner sideways clips the mesh too
+    const px = -(dz / d), pz = dx / d;
+    _probeB.set(nx + px * 0.25, chestY, nz + pz * 0.25);
+    if (env.world.sweep(_probeA, _probeB)) return false;
+    _probeB.set(nx - px * 0.25, chestY, nz - pz * 0.25);
+    if (env.world.sweep(_probeA, _probeB)) return false;
+  }
   b.pos.set(nx, floor + S.height / 2, nz);
   b.vel.set((dx / d) * speed, 0, (dz / d) * speed);
   return true;
@@ -151,9 +193,17 @@ export function stepSoldier(b: Bot, ctx: BotCtx, env: BotEnv, dt: number, events
         break;
       }
       if (!b.waypoint) {
-        const w = env.sampleWaypoint();
-        if (w) b.waypoint = new THREE.Vector3(w.x, w.y, w.z);
+        const w = pickWaypoint(b, env, feetY + 1.0);
+        if (w) {
+          b.waypoint = new THREE.Vector3(w.x, w.y, w.z);
+          b.wpTime = 0;
+        }
         break; // no waypoint this tick — stand
+      }
+      b.wpTime += dt;
+      if (b.wpTime > 12) { // walled off / circling — give up on this waypoint
+        b.waypoint = null;
+        break;
       }
       b.yaw = slewYaw(b.yaw, yawToward(b.waypoint.x - b.pos.x, b.waypoint.z - b.pos.z), S.yawSlewRad, dt);
       const arrived = Math.hypot(b.waypoint.x - b.pos.x, b.waypoint.z - b.pos.z) < 1;
@@ -252,6 +302,28 @@ function moveAir(b: Bot, tx: number, ty: number, tz: number, speed: number, dt: 
   if (dv > maxDv) _dv.multiplyScalar(maxDv / dv);
   b.vel.add(_dv);
 
+  // look-ahead: shed the into-wall velocity component while the wall is still
+  // meters away, ramping up as it gets close — drones bank along walls instead
+  // of ramming them and grinding on the push-out. The normal is oriented by
+  // POSITION (away from the surface, toward us): velocity-based orientation is
+  // ambiguous while sliding parallel and can point into the wall.
+  const spd = b.vel.length();
+  if (spd > 0.5 && env.world.sweep) {
+    _probeA.copy(b.pos).addScaledVector(b.vel, LOOKAHEAD_M / spd);
+    const ahead = env.world.sweep(b.pos, _probeA);
+    if (ahead) {
+      _n.copy(ahead.normal);
+      _probeB.subVectors(b.pos, ahead.point);
+      if (_n.dot(_probeB) < 0) _n.negate();
+      const dist = ahead.point.distanceTo(b.pos);
+      const urgency = 1 - Math.max(0, Math.min(1, (dist - DRONE_CLEARANCE) / LOOKAHEAD_M));
+      const into = b.vel.dot(_n);
+      if (into < 0) b.vel.addScaledVector(_n, -into * urgency);
+      // standoff: hugging closer than the mesh clearance → gently push out
+      if (dist < DRONE_CLEARANCE) b.vel.addScaledVector(_n, (DRONE_CLEARANCE - dist) * 3);
+    }
+  }
+
   _next.copy(b.pos).addScaledVector(b.vel, dt);
   if (env.floorAt(_next.x, _next.z) === null) {
     // the step would cross the map-footprint edge — hold and bleed speed
@@ -261,13 +333,34 @@ function moveAir(b: Bot, tx: number, ty: number, tz: number, speed: number, dt: 
   const hit = env.world.sweep ? env.world.sweep(b.pos, _next) : null;
   if (hit) {
     _n.copy(hit.normal);
-    if (_n.dot(b.vel) > 0) _n.negate(); // orient the normal against motion
-    if (hit.point.distanceTo(b.pos) < 0.05) {
-      // wedged against/inside a surface — nudge out and try again next tick
-      b.pos.addScaledVector(_n, 0.5);
+    _probeB.subVectors(b.pos, hit.point);
+    if (_n.dot(_probeB) < 0) _n.negate(); // normal points away from the wall, toward us
+    const hd = hit.point.distanceTo(b.pos);
+    if (hd < 0.05) {
+      // wedged against/inside a surface — small VERIFIED nudge out. A blind
+      // 0.5m shove can punch through thin BSP walls (many are 0.1-0.2m).
+      _probeA.copy(b.pos).addScaledVector(_n, 0.15);
+      if (!env.world.sweep!(b.pos, _probeA)) {
+        b.pos.copy(_probeA);
+      } else {
+        // trapped inside geometry — rescue: pop to the safe band above the
+        // local column (strict floor of a wall is its top, so this exits up)
+        const fl = env.floorAt(b.pos.x, b.pos.z);
+        if (fl !== null) b.pos.y = fl + D.altMin;
+      }
+      b.vel.set(0, 0, 0);
       return;
     }
-    _next.copy(hit.point).addScaledVector(_n, 0.4);
+    // stop short of the wall, easing outward ≤10cm/tick toward full clearance
+    // (a hard backward jump could cross the opposite wall of a narrow gap —
+    // the corner-safety sweep below verifies the point before we take it)
+    _next.copy(hit.point).addScaledVector(_n, Math.min(DRONE_CLEARANCE, hd + 0.1));
+    // corner safety: the push-out point must itself be reachable — in a corner
+    // it can land inside the SECOND wall, which is how drones ended up wedged
+    if (env.world.sweep!(b.pos, _next)) {
+      b.vel.set(0, 0, 0); // hold this tick; steering re-plans next tick
+      return;
+    }
     const into = b.vel.dot(_n);
     if (into < 0) b.vel.addScaledVector(_n, -into); // slide along the wall
   }
@@ -288,7 +381,7 @@ export function stepDrone(b: Bot, ctx: BotCtx, env: BotEnv, dt: number, events: 
         break;
       }
       if (!b.waypoint) {
-        const w = env.sampleWaypoint();
+        const w = pickWaypoint(b, env, b.pos.y);
         if (w) {
           b.waypoint = new THREE.Vector3(w.x, w.y + (D.altMin + D.altMax) / 2, w.z);
           b.wpTime = 0;

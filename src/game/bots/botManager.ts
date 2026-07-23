@@ -30,6 +30,10 @@ const WAYPOINT_CLEARANCE = 8;
 const _right = new THREE.Vector3();
 const _fwd = new THREE.Vector3();
 
+/** Enemy drone visual scale (player quad is ~0.37m across; ×3 ≈ 1.1m span).
+ *  TUNING.drone.hitRadius and botBrain's wall clearance are sized to match. */
+const DRONE_SCALE = 3;
+
 export class BotManager {
   readonly group = new THREE.Group();
   kills = 0;
@@ -66,7 +70,20 @@ export class BotManager {
     this.group.name = 'bots';
     this.env = {
       world,
-      floorAt: (x, z) => (this.strictFloor ? this.strictFloor(x, z) : this.world.floorAt(x, 200, z)),
+      // Strict floor with seam tolerance: the single-ray sampler slips through
+      // cracks between BSP brushes and reports null MID-MAP, which froze
+      // drones dead ("off the footprint edge") while hovering over a seam.
+      floorAt: (x, z) => {
+        const s = this.strictFloor;
+        if (!s) return this.world.floorAt(x, 200, z);
+        const c = s(x, z);
+        if (c !== null) return c;
+        for (const [dx, dz] of [[0.35, 0], [-0.35, 0], [0, 0.35], [0, -0.35]]) {
+          const t = s(x + dx, z + dz);
+          if (t !== null) return t;
+        }
+        return null; // genuinely off the map footprint
+      },
       sampleWaypoint: () =>
         samplePoint({
           world: this.world,
@@ -88,7 +105,7 @@ export class BotManager {
       let poser: ((walkPhase: number, aimPitch: number) => void) | null = null;
       if (kind === 'drone') {
         mesh = createDroneMesh({ accent: 0xff2222 });
-        mesh.scale.setScalar(1.6); // readable at range
+        mesh.scale.setScalar(DRONE_SCALE); // heavy interceptor read, not a gnat
       } else {
         const s = createSoldierMesh();
         mesh = s.group;

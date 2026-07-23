@@ -11,7 +11,7 @@ export type BotAiState = 'patrol' | 'alert' | 'engage' | 'seek' | 'dead';
 export const TUNING = {
   drone: {
     hp: 20,
-    hitRadius: 0.35,
+    hitRadius: 0.6, // matches the 3× mesh (~0.56m half-span) — see DRONE_SCALE
     respawnS: 10,
     hoverAlt: 5,
     patrolSpeed: 6,
