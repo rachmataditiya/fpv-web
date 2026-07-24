@@ -95,6 +95,25 @@ export class FxSystem {
       ...this.explosionSlots, ...this.impactSlots,
       ...this.smokeSlots, ...this.sparkSlots, ...this.puffSlots,
     ];
+
+    // Kenney particle textures (CC0) float in when available — the procedural
+    // soft-circle stays as the instant fallback (offline dev, stripped deploy)
+    const texLoader = new THREE.TextureLoader();
+    const applyTex = (url: string, mats: (THREE.SpriteMaterial | THREE.PointsMaterial)[]): void => {
+      texLoader
+        .loadAsync(url)
+        .then((t) => {
+          t.colorSpace = THREE.SRGBColorSpace;
+          for (const m of mats) {
+            m.map = t;
+            m.needsUpdate = true;
+          }
+        })
+        .catch(() => { /* keep the soft circle */ });
+    };
+    applyTex('/assets/fx/fireball.png', this.fireballSlots.map((s) => s.sprite.material as THREE.SpriteMaterial));
+    applyTex('/assets/fx/muzzle.png', this.muzzleSlots.map((s) => s.sprite.material as THREE.SpriteMaterial));
+    applyTex('/assets/fx/smoke.png', this.smokeSlots.map((s) => s.points.material as THREE.PointsMaterial));
   }
 
   /** Generic pooled Points builder for the small effects. */

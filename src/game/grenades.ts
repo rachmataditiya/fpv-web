@@ -25,7 +25,8 @@ interface Slot {
   pos: THREE.Vector3;
   vel: THREE.Vector3;
   ttl: number;
-  mesh: THREE.Mesh;
+  /** Visual container — main.ts may swap the procedural sphere for a GLB. */
+  mesh: THREE.Group;
 }
 
 const _next = new THREE.Vector3();
@@ -42,11 +43,17 @@ export class GrenadePool {
     const geo = new THREE.SphereGeometry(0.09, 8, 6);
     const mat = new THREE.MeshStandardMaterial({ color: 0x1d211d, roughness: 0.5, metalness: 0.4 });
     for (let i = 0; i < size; i++) {
-      const mesh = new THREE.Mesh(geo, mat);
+      const mesh = new THREE.Group();
+      mesh.add(new THREE.Mesh(geo, mat));
       mesh.visible = false;
       this.group.add(mesh);
       this.slots.push({ alive: false, pos: new THREE.Vector3(), vel: new THREE.Vector3(), ttl: 0, mesh });
     }
+  }
+
+  /** Per-slot visual containers (for GLB swaps by the caller). */
+  get slotMeshes(): readonly THREE.Group[] {
+    return this.slots.map((s) => s.mesh);
   }
 
   get ready(): boolean {

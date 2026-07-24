@@ -10,6 +10,7 @@
 import * as THREE from 'three';
 import { createDroneMesh } from '../../render/drone';
 import { createSoldierMesh, SOLDIER_HEIGHT } from '../../render/soldierMesh';
+import type { SoldierMesh } from '../../render/soldierMesh';
 import type { FxSystem } from '../../render/fx';
 import type { CollisionWorld } from '../../physics/quad';
 import type { ShotTarget } from '../weapon';
@@ -151,7 +152,12 @@ export class BotManager {
     extraSpawns: { pos: [number, number, number]; yawDeg: number }[] = [],
     squad: SquadMember[] = DEFAULT_SQUAD,
     seed = 4242,
-    opts: { difficulty?: BotDifficulty; fx?: FxSystem | null } = {},
+    opts: {
+      difficulty?: BotDifficulty;
+      fx?: FxSystem | null;
+      /** GLTF soldier factory (render upgrade) — null return = procedural. */
+      soldierFactory?: () => SoldierMesh | null;
+    } = {},
   ) {
     this.world = world;
     this.bounds = bounds;
@@ -233,7 +239,8 @@ export class BotManager {
         mesh = createDroneMesh({ accent: 0xff2222 });
         mesh.scale.setScalar(DRONE_SCALE); // heavy interceptor read, not a gnat
       } else {
-        const s = createSoldierMesh();
+        // GLTF soldier when the template is preloaded; procedural otherwise
+        const s = opts.soldierFactory?.() ?? createSoldierMesh();
         mesh = s.group;
         poser = s.setPose;
         downer = s.setDown;

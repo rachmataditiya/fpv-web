@@ -37,6 +37,8 @@ import { WEATHERS } from './game/weatherTable';
 import type { WeatherId } from './game/weatherTable';
 import { RagdollPool } from './render/ragdoll';
 import { DecalPool } from './render/decals';
+import { swapInModel } from './render/modelLoader';
+import { createSoldierInstance, initSoldierTemplate } from './render/soldierGltf';
 import { GrenadePool, GRENADE_BLAST_RADIUS, GRENADE_BOT_DAMAGE, GRENADE_PLAYER_DAMAGE } from './game/grenades';
 import { MissionRunner } from './game/missions';
 import type { MissionDef, MissionCtx } from './game/missions';
@@ -168,6 +170,9 @@ const ragdolls = new RagdollPool(scene);
 const decals = new DecalPool(scene);
 const grenades = new GrenadePool();
 scene.add(grenades.group);
+// GLTF upgrades (Kenney CC0) — all fire-and-forget: procedural stays if 404
+void initSoldierTemplate();
+for (const slot of grenades.slotMeshes) void swapInModel(slot, '/assets/models/blaster/grenade.glb', { targetSize: 0.22 });
 
 // ---------- career + mission state (wave 5+8) ----------
 const career = new Career();
@@ -345,10 +350,10 @@ function switchWeapon(id: WeaponId): void {
 const PICKUP_COLORS: Record<WeaponId, number> = { blaster: 0x3ddc84, burst: 0xffb020, railgun: 0x49c8ff };
 function createPickupMesh(id: WeaponId): THREE.Group {
   const color = PICKUP_COLORS[id];
-  const core = new THREE.Mesh(
-    new THREE.OctahedronGeometry(0.25),
-    new THREE.MeshBasicMaterial({ color }),
-  );
+  const core = new THREE.Group();
+  core.add(new THREE.Mesh(new THREE.OctahedronGeometry(0.25), new THREE.MeshBasicMaterial({ color })));
+  // Kenney blaster model floats in when available (octahedron until then)
+  void swapInModel(core, `/assets/models/blaster/weapon-${id}.glb`, { targetSize: 0.6 });
   const ring = new THREE.Mesh(
     new THREE.TorusGeometry(0.42, 0.02, 8, 32),
     new THREE.MeshBasicMaterial({ color, wireframe: true }),
@@ -586,7 +591,7 @@ if (bspName) {
             bsp.spawns.slice(1), // the map's unused player spawns make natural bot posts
             currentSquad,
             4242,
-            { difficulty: botDifficulty, fx },
+            { difficulty: botDifficulty, fx, soldierFactory: createSoldierInstance },
           );
         swapBots(); // builds the initial squad from currentSquad
         // target source reads the LIVE module var — mission waves replace the
