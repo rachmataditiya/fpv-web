@@ -30,10 +30,10 @@ export interface FlightInput {
 /** Mappable button actions (edge-triggered by the InputManager). */
 export type Action =
   | 'arm' | 'respawn' | 'camera' | 'pause' | 'shoot' | 'restart'
-  | 'weapon1' | 'weapon2' | 'weapon3' | 'weaponNext';
+  | 'weapon1' | 'weapon2' | 'weapon3' | 'weaponNext' | 'grenade';
 export const ACTIONS: readonly Action[] = [
   'arm', 'respawn', 'camera', 'pause', 'shoot', 'restart',
-  'weapon1', 'weapon2', 'weapon3', 'weaponNext',
+  'weapon1', 'weapon2', 'weapon3', 'weaponNext', 'grenade',
 ];
 
 /** Per-function axis mapping (function → physical axis + response curve). */

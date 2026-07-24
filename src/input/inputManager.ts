@@ -17,7 +17,7 @@ export class InputManager {
   private profileId: string | null = null;
   private prevBtn: Record<Action, boolean> = {
     arm: false, respawn: false, camera: false, pause: false, shoot: false, restart: false,
-    weapon1: false, weapon2: false, weapon3: false, weaponNext: false,
+    weapon1: false, weapon2: false, weapon3: false, weaponNext: false, grenade: false,
   };
   private out: FlightInput = { rollRate: 0, pitchRate: 0, yawRate: 0, throttle: 0 };
 

@@ -115,6 +115,8 @@ export class BotManager {
   kills = 0;
   /** Track editor open etc. — AI goes idle (respawn timers keep running). */
   passive = false;
+  /** main.ts spawns ragdolls for dead soldiers — skip the built-in crumple. */
+  externalSoldierCorpses = false;
 
   private bots: Bot[] = [];
   /** Parallel to bots: soldier pose driver (null for drones). */
@@ -294,6 +296,22 @@ export class BotManager {
     return this.killBot(i);
   }
 
+  /** Weather coupling: scale every bot's senses live. Factors multiply the
+   *  CLASS_TUNING base values (difficulty never touches senses, so the base
+   *  is authoritative) — dust storms blind snipers, night sharpens ears. */
+  setWeather(visFactor: number, hearFactor: number): void {
+    for (const b of this.bots) {
+      // rifleman = the kind base block, others = CLASS_TUNING (same as make())
+      const base = b.botClass === 'rifleman' ? TUNING[b.kind] : CLASS_TUNING[b.botClass];
+      b.tune.visionRange = base.visionRange * visFactor;
+      b.tune.hearRange = base.hearRange * hearFactor;
+      b.tune.rotorHearRange = base.rotorHearRange * hearFactor;
+      b.tuneSuppressed.visionRange = b.tune.visionRange;
+      b.tuneSuppressed.hearRange = b.tune.hearRange;
+      b.tuneSuppressed.rotorHearRange = b.tune.rotorHearRange;
+    }
+  }
+
   /** Area damage (barrel blast): every living bot inside `radius` of `pos`
    *  takes `damage`. Returns the death events — kills count for the player
    *  (they lit the barrel). */
@@ -329,6 +347,12 @@ export class BotManager {
     b.alive = false;
     b.state = 'dead';
     b.respawnIn = b.tune.respawnS;
+    if (b.kind === 'soldier' && this.externalSoldierCorpses) {
+      // a ragdoll takes over the corpse — hide instantly, skip the crumple
+      b.mesh.visible = false;
+      this.deathAnims[i] = null;
+      return { type: 'bot-died', kind: b.kind, pos: b.pos };
+    }
     this.deathAnims[i] = {
       t: 0,
       from: b.pos.clone(),

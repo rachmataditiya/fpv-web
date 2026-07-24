@@ -1,5 +1,7 @@
 import type { BotDifficulty, Quality, Settings } from '../state';
 import type { Profile } from '../input/types';
+import { WEATHERS, WEATHER_IDS } from '../game/weatherTable';
+import type { WeatherId } from '../game/weatherTable';
 
 export interface SettingsDeps {
   settings: Settings;
@@ -16,6 +18,8 @@ export interface SettingsDeps {
     volume(v: number): void;
     /** Killer-POV replay on death — read at death time, no live apply needed. */
     killcam(on: boolean): void;
+    /** Weather — applied live on BSP maps (sky + fog + bot senses). */
+    weather(w: WeatherId): void;
   };
   save(): void;
   /** Live access to the ACTIVE input device's profile (rates/expo/throttle). */
@@ -64,6 +68,7 @@ const SHORTCUT_GROUPS: { title: string; rows: [string, string][] }[] = [
       ['Space (hold)', 'Fire — auto-fire / charge railgun'],
       ['1 / 2 / 3', 'Blaster / Burst / Railgun'],
       ['Q', 'Next weapon'],
+      ['F', 'Drop grenade (gamepad: LB)'],
       ['Space or R', 'Skip killcam'],
     ],
   },
@@ -173,6 +178,9 @@ export class SettingsPanel {
     check('killcam-check', s.killcam);
     this.overlayEl.querySelectorAll<HTMLButtonElement>('.difficulty-btn').forEach(btn => {
       btn.classList.toggle('active', btn.dataset.difficulty === s.botDifficulty);
+    });
+    this.overlayEl.querySelectorAll<HTMLButtonElement>('.weather-btn').forEach(btn => {
+      btn.classList.toggle('active', btn.dataset.weather === s.weather);
     });
 
     // Rates & throttle (active device profile)
@@ -303,6 +311,28 @@ export class SettingsPanel {
       this.deps.settings.killcam = on;
       this.deps.apply.killcam(on);
     });
+    const weatherLabel = document.createElement('label');
+    weatherLabel.className = 'slider-label';
+    weatherLabel.textContent = 'Weather (BSP maps — affects bot vision)';
+    war.appendChild(weatherLabel);
+    const weatherGrid = document.createElement('div');
+    weatherGrid.className = 'quality-buttons';
+    weatherGrid.style.flexWrap = 'wrap';
+    for (const w of WEATHER_IDS) {
+      const btn = document.createElement('button');
+      btn.classList.add('quality-btn', 'weather-btn');
+      btn.style.flexBasis = '33%';
+      btn.textContent = WEATHERS[w].label;
+      btn.dataset.weather = w;
+      btn.addEventListener('click', () => {
+        this.deps.settings.weather = w;
+        this.deps.apply.weather(w);
+        this.deps.save();
+        this.syncControls();
+      });
+      weatherGrid.appendChild(btn);
+    }
+    war.appendChild(weatherGrid);
 
     // ================= AUDIO =================
     this._appendSlider(pages.audio, 'volume', 'Master volume', '0', '100', '1', '%', (v) => {

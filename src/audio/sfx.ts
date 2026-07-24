@@ -506,4 +506,219 @@ export class Sfx {
     }
     return Sfx.noiseBuffer!;
   }
+
+  private static perBusGain: { engine: number; combat: number; ambience: number } = {
+    engine: 1,
+    combat: 1,
+    ambience: 1,
+  };
+
+  private ambienceSource?: AudioBufferSourceNode;
+  private ambienceGain?: GainNode;
+  private ambienceFilter?: BiquadFilterNode;
+  private ambienceLFO?: OscillatorNode;
+  private ambienceLFOGain?: GainNode;
+
+  /**
+   * Gunshot variant with lowpass filter to simulate occlusion.
+   */
+  shootOccluded(): void {
+    this.playOccludedShot(1);
+  }
+
+  /**
+   * Bot gunshot: occluded + pitched down (0.55 rate).
+   */
+  botShootOccluded(): void {
+    this.playOccludedShot(0.55);
+  }
+
+  private playOccludedShot(rate: number): void {
+    this.ensureContext();
+    if (Sfx.disabled || !Sfx.ctx || !Sfx.masterGain) return;
+
+    const now = Sfx.ctx.currentTime;
+    if (Sfx.activeCount >= Sfx.MAX_ACTIVE) return;
+    Sfx.activeCount++;
+
+    const busGain = Sfx.perBusGain.combat;
+
+    const source = Sfx.ctx.createBufferSource();
+    source.buffer = this.getNoiseBuffer();
+    source.playbackRate.value = rate;
+
+    const filter = Sfx.ctx.createBiquadFilter();
+    filter.type = 'lowpass';
+    filter.frequency.value = 500;
+    filter.Q.value = 1;
+
+    const gainNode = Sfx.ctx.createGain();
+    gainNode.gain.setValueAtTime(0.001, now);
+    gainNode.gain.exponentialRampToValueAtTime(0.4 * busGain, now + 0.01);
+    gainNode.gain.exponentialRampToValueAtTime(0.001, now + 0.15);
+
+    source.connect(filter).connect(gainNode).connect(Sfx.masterGain);
+    source.start(now);
+    source.stop(now + 0.2);
+
+    source.onended = () => {
+      source.disconnect();
+      filter.disconnect();
+      gainNode.disconnect();
+      Sfx.activeCount--;
+    };
+  }
+
+  /**
+   * Explosion from distance: lowpass cutoff decreases, gain fades with distance.
+   * distance01: 0 = close/full, 1 = far (100m).
+   */
+  explodeFar(distance01: number): void {
+    this.ensureContext();
+    if (Sfx.disabled || !Sfx.ctx || !Sfx.masterGain) return;
+
+    const d = Math.min(1, Math.max(0, distance01));
+    const now = Sfx.ctx.currentTime;
+    if (Sfx.activeCount >= Sfx.MAX_ACTIVE) return;
+    Sfx.activeCount++;
+
+    const busGain = Sfx.perBusGain.combat;
+    const volume = 1 - d;
+
+    const source = Sfx.ctx.createBufferSource();
+    source.buffer = this.getNoiseBuffer();
+    source.playbackRate.value = 0.8;
+
+    const filter = Sfx.ctx.createBiquadFilter();
+    filter.type = 'lowpass';
+    filter.frequency.value = 400 + (1 - d) * 1600;
+    filter.Q.value = 0.8;
+
+    const gainNode = Sfx.ctx.createGain();
+    gainNode.gain.setValueAtTime(0.001, now);
+    gainNode.gain.exponentialRampToValueAtTime(0.8 * volume * busGain, now + 0.02);
+    gainNode.gain.exponentialRampToValueAtTime(0.001, now + 0.6);
+
+    source.connect(filter).connect(gainNode).connect(Sfx.masterGain);
+    source.start(now);
+    source.stop(now + 0.8);
+
+    source.onended = () => {
+      source.disconnect();
+      filter.disconnect();
+      gainNode.disconnect();
+      Sfx.activeCount--;
+    };
+  }
+
+  /**
+   * Set per-bus gain multiplier (applied to one-shots and ambience).
+   * bus: 'engine' | 'combat' | 'ambience'
+   * gain01: 0..1
+   */
+  setBus(bus: 'engine' | 'combat' | 'ambience', gain01: number): void {
+    Sfx.perBusGain[bus] = Math.max(0, Math.min(1, gain01));
+  }
+
+  /**
+   * Start ambient bed (looping, very quiet ≤ 0.06).
+   * kind: 'desert' (brown noise lowpass 300Hz) | 'nature' (wind-like bandpass).
+   */
+  startAmbience(kind: 'desert' | 'nature'): void {
+    if (this.ambienceSource) return;
+
+    this.ensureContext();
+    if (Sfx.disabled || !Sfx.ctx || !Sfx.masterGain) return;
+
+    const now = Sfx.ctx.currentTime;
+    const busGain = Sfx.perBusGain.ambience;
+
+    const buffer = kind === 'desert'
+      ? this.createBrownNoiseBuffer(3)
+      : this.getNoiseBuffer();
+
+    this.ambienceSource = Sfx.ctx.createBufferSource();
+    this.ambienceSource.buffer = buffer;
+    this.ambienceSource.loop = true;
+
+    this.ambienceFilter = Sfx.ctx.createBiquadFilter();
+    this.ambienceFilter.type = kind === 'desert' ? 'lowpass' : 'bandpass';
+    this.ambienceFilter.frequency.value = kind === 'desert' ? 300 : 600;
+    this.ambienceFilter.Q.value = 1;
+
+    this.ambienceGain = Sfx.ctx.createGain();
+    this.ambienceGain.gain.setValueAtTime(0, now);
+    this.ambienceGain.gain.setTargetAtTime(0.06 * busGain, now, 0.1);
+
+    this.ambienceLFO = Sfx.ctx.createOscillator();
+    this.ambienceLFO.frequency.value = 0.15;
+    this.ambienceLFO.type = 'sine';
+
+    this.ambienceLFOGain = Sfx.ctx.createGain();
+    this.ambienceLFOGain.gain.value = 0.02;
+
+    this.ambienceLFO.connect(this.ambienceLFOGain);
+    if (kind === 'desert') {
+      this.ambienceLFOGain.connect(this.ambienceGain.gain);
+    } else {
+      this.ambienceLFOGain.connect(this.ambienceFilter.frequency);
+    }
+
+    this.ambienceSource.connect(this.ambienceFilter);
+    this.ambienceFilter.connect(this.ambienceGain);
+    this.ambienceGain.connect(Sfx.masterGain);
+
+    this.ambienceSource.start(now);
+    this.ambienceLFO.start(now);
+  }
+
+  /**
+   * Stop ambient bed (fade out ~0.05s).
+   */
+  stopAmbience(): void {
+    if (!this.ambienceSource) return;
+
+    const now = Sfx.ctx?.currentTime ?? 0;
+    if (this.ambienceGain) {
+      this.ambienceGain.gain.setTargetAtTime(0.001, now, 0.05);
+    }
+
+    setTimeout(() => {
+      try {
+        this.ambienceSource?.stop();
+        this.ambienceLFO?.stop();
+      } catch { /* already stopped */ }
+
+      this.ambienceSource?.disconnect();
+      this.ambienceGain?.disconnect();
+      this.ambienceFilter?.disconnect();
+      this.ambienceLFO?.disconnect();
+      this.ambienceLFOGain?.disconnect();
+
+      this.ambienceSource = undefined;
+      this.ambienceGain = undefined;
+      this.ambienceFilter = undefined;
+      this.ambienceLFO = undefined;
+      this.ambienceLFOGain = undefined;
+    }, 100);
+  }
+
+  private createBrownNoiseBuffer(durationSec: number): AudioBuffer {
+    if (!Sfx.ctx) throw new Error('AudioContext not initialized');
+
+    const sampleRate = Sfx.ctx.sampleRate;
+    const length = sampleRate * durationSec;
+    const buffer = Sfx.ctx.createBuffer(1, length, sampleRate);
+    const data = buffer.getChannelData(0);
+
+    let lastOut = 0;
+    for (let i = 0; i < length; i++) {
+      const white = Math.random() * 2 - 1;
+      lastOut = (lastOut + 0.02 * white) / 1.02;
+      data[i] = lastOut * 3.5;
+    }
+
+    return buffer;
+  }
+
 }

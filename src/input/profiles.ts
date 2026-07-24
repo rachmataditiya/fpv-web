@@ -21,7 +21,7 @@ function baseProfile(): Profile {
     },
     buttons: {
       arm: null, respawn: null, camera: null, pause: null, shoot: null, restart: null,
-      weapon1: null, weapon2: null, weapon3: null, weaponNext: null,
+      weapon1: null, weapon2: null, weapon3: null, weaponNext: null, grenade: null,
     },
   };
 }
@@ -54,7 +54,7 @@ function seedFor(id: string): Profile {
     p.axes.yaw.rate = 220;
     p.buttons = {
       arm: 0, respawn: 1, camera: 2, pause: 3, shoot: 4, restart: 5, // Space=shoot, Backspace=restart
-      weapon1: 6, weapon2: 7, weapon3: 8, weaponNext: 9, // Digit1/2/3, KeyQ
+      weapon1: 6, weapon2: 7, weapon3: 8, weaponNext: 9, grenade: 10, // Digit1/2/3, KeyQ, KeyF
     };
   } else {
     // Generic gamepad (Mode-2)
@@ -62,7 +62,7 @@ function seedFor(id: string): Profile {
     p.axes.pitch.axis = 3;
     p.axes.throttle.axis = 1;
     p.axes.yaw.axis = 0;
-    p.buttons = { arm: 0, respawn: 1, camera: 3, pause: 9, shoot: 7, restart: 8, weapon1: null, weapon2: null, weapon3: null, weaponNext: 5 }; // RT=shoot, Back=restart, RB=next weapon
+    p.buttons = { arm: 0, respawn: 1, camera: 3, pause: 9, shoot: 7, restart: 8, weapon1: null, weapon2: null, weapon3: null, weaponNext: 5, grenade: 4 }; // RT=shoot, Back=restart, RB=next weapon, LB=grenade
   }
   return p;
 }

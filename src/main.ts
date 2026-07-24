@@ -31,6 +31,14 @@ import { ReplayRecorder, ReplayPlayer } from './game/replay';
 import type { QuadSnapshot } from './game/replay';
 import { FxSystem } from './render/fx';
 import { Sfx } from './audio/sfx';
+import { EngineAudio } from './audio/engineAudio';
+import { Atmosphere } from './render/atmosphere';
+import { WEATHERS } from './game/weatherTable';
+import type { WeatherId } from './game/weatherTable';
+import { RagdollPool } from './render/ragdoll';
+import { DecalPool } from './render/decals';
+import { GrenadePool, GRENADE_BLAST_RADIUS, GRENADE_BOT_DAMAGE, GRENADE_PLAYER_DAMAGE } from './game/grenades';
+import type { BotDiedEvent } from './game/bots/types';
 import { buildTrack, deleteTrackFor, exportTrackJson, fetchServerTrack, savedTrackFor, saveTrackFor } from './world/bsp/bspTracks';
 import { listServerMaps } from './world/bsp/serverMaps';
 import type { GateDef, TrackDef } from './world/track';
@@ -58,8 +66,12 @@ const customName = rawMap.startsWith('custom:') ? rawMap.slice('custom:'.length)
 const serverName = rawMap.startsWith('server:') ? rawMap.slice('server:'.length) : null;
 const bspName = customName ?? serverName;
 const mapDef = bspName ? customMapDef(bspName) : MAPS[resolveMapId(rawMap)];
-if (settings.map !== mapDef.id) {
-  settings.map = mapDef.id;
+// Persist the RAW map ref for BSP maps — mapDef.id collapses both sources to
+// "custom:<name>", so a server map visited once would break every later plain
+// visit ("map not found" in an empty IndexedDB).
+const persistId = bspName ? rawMap : mapDef.id;
+if (settings.map !== persistId) {
+  settings.map = persistId;
   saveSettings(settings);
 }
 const track = mapDef.track; // null on cinematic maps → no race, free-fly
@@ -141,6 +153,63 @@ let makeBots: (() => BotManager) | null = null;
 const fx = new FxSystem(scene);
 const sfx = new Sfx();
 sfx.setVolume(settings.volume);
+const engine = new EngineAudio();
+engine.setVolume(settings.volume);
+const atmosphere = new Atmosphere(scene);
+const ragdolls = new RagdollPool(scene);
+const decals = new DecalPool(scene);
+const grenades = new GrenadePool();
+scene.add(grenades.group);
+
+/** Grenade detonation: FX + bots + barrel chain + the pilot if they linger. */
+function onGrenadeBlast(pos: THREE.Vector3): void {
+  fx.explosion(pos);
+  sfx.explode();
+  if (bots) {
+    for (const died of bots.blast(pos, GRENADE_BLAST_RADIUS, GRENADE_BOT_DAMAGE)) {
+      recorder.logEvent('bot-died', [died.pos.x, died.pos.y, died.pos.z]);
+      fx.explosion(died.pos);
+      spawnCorpse(died);
+      hud.pulseKill();
+      flash(`${died.kind === 'drone' ? 'DRONE' : 'SOLDIER'} BOMBED — ${bots.kills}`, 900);
+    }
+  }
+  if (barrels) {
+    // chain reaction: barrels inside the blast go up too
+    const bt = barrels.targets;
+    for (let i = 0; i < bt.length; i++) {
+      if (bt[i].alive && bt[i].pos.distanceTo(pos) < GRENADE_BLAST_RADIUS) {
+        onBarrelBoom(barrels.explode(i));
+      }
+    }
+  }
+  if (!quad.crashed && quad.pos.distanceTo(pos) < GRENADE_BLAST_RADIUS) {
+    hud.pulseDamage();
+    if (playerHealth.damage(GRENADE_PLAYER_DAMAGE)) killPlayer(-1);
+    else flash('TOO CLOSE TO YOUR OWN GRENADE!');
+  }
+}
+const _corpseImpulse = new THREE.Vector3();
+
+/** Soldier deaths hand the corpse to the ragdoll pool (manager skips its
+ *  crumple via externalSoldierCorpses); drones keep the tumble+smoke anim. */
+function spawnCorpse(died: BotDiedEvent): void {
+  if (died.kind !== 'soldier') return;
+  _corpseImpulse.subVectors(died.pos, quad.pos);
+  const d = _corpseImpulse.length() || 1;
+  _corpseImpulse.multiplyScalar(4.5 / d).y = 2.5; // shot direction + a pop upward
+  ragdolls.spawn(died.pos, _corpseImpulse);
+}
+
+const ragdollFloor = (x: number, z: number): number | null =>
+  collisionWorld ? collisionWorld.floorAt(x, 200, z) : null;
+
+/** Weather is the BSP war-mode dressing — built-in maps keep their HDRI sky. */
+function applyWeather(w: WeatherId): void {
+  if (!bspName) return;
+  atmosphere.apply(w);
+  bots?.setWeather(WEATHERS[w].visibilityFactor, WEATHERS[w].hearingFactor);
+}
 
 // heavy-rocket visuals — additive sprites synced to whichever bot manager is
 // on screen (live, or the killcam playback manager)
@@ -338,11 +407,14 @@ function killPlayer(killerIdx: number): void {
  *  area damage, and the too-close player crash check. */
 function onBarrelBoom(pos: THREE.Vector3): void {
   fx.explosion(pos);
-  sfx.explode();
+  const boomDist = quad.pos.distanceTo(pos);
+  if (boomDist > 30) sfx.explodeFar(Math.min(1, boomDist / 100));
+  else sfx.explode();
   if (bots) {
     for (const died of bots.blast(pos, BARREL_BLAST_RADIUS, BARREL_BLAST_BOT_DAMAGE)) {
       recorder.logEvent('bot-died', [died.pos.x, died.pos.y, died.pos.z]);
       fx.explosion(died.pos);
+      spawnCorpse(died);
       hud.pulseKill();
       flash(`${died.kind === 'drone' ? 'DRONE' : 'SOLDIER'} CAUGHT IN THE BLAST — ${bots.kills}`, 900);
     }
@@ -379,7 +451,11 @@ function restartRace(): void {
 if (bspName) {
   void (async () => {
     try {
-      const stored = serverName ? await fetchServerMap(serverName) : await loadMap(bspName);
+      // custom: falls back to the server folder — heals settings persisted by
+      // the old build that collapsed server:<name> into custom:<name>
+      const stored = serverName
+        ? await fetchServerMap(serverName)
+        : (await loadMap(bspName)) ?? (await fetchServerMap(bspName).catch(() => null));
       if (!stored) throw new Error(`map "${bspName}" not found`);
       const wadTex = new Map<string, import('./world/bsp/bspParser').BspTexture>();
       for (const wad of stored.wads) {
@@ -447,7 +523,9 @@ if (bspName) {
           );
         const bm = makeBots();
         bots = bm;
+        bm.externalSoldierCorpses = true; // live deaths ragdoll; killcam bots keep the crumple
         scene.add(bm.group);
+        applyWeather(settings.weather);
         targetRegistry.register({
           get targets() { return bm.targets; },
           onHit: (i, damage) => {
@@ -456,6 +534,7 @@ if (bspName) {
               recorder.logEvent('bot-died', [died.pos.x, died.pos.y, died.pos.z]);
               fx.explosion(died.pos);
               sfx.explode();
+              spawnCorpse(died);
               hud.pulseKill();
               flash(`${died.kind === 'drone' ? 'DRONE' : 'SOLDIER'} DOWN — ${bm.kills}`, 900);
             } else {
@@ -504,6 +583,10 @@ input.onAction = (a) => {
         if (lastThrottle < 0.1) {
           quad.armed = true;
           flash('ARMED', 700);
+          if (!ambienceOn) {
+            sfx.startAmbience(bspName ? 'desert' : 'nature');
+            ambienceOn = true;
+          }
         } else {
           flash('LOWER THROTTLE TO ARM');
         }
@@ -515,6 +598,12 @@ input.onAction = (a) => {
     case 'respawn':
       recorder.recordAction('respawn');
       respawn();
+      break;
+    case 'grenade':
+      if (quad.armed && !quad.crashed) {
+        if (grenades.drop(quad.pos, quad.vel)) flash('GRENADE OUT', 600);
+        else flash('GRENADE RELOADING…', 500);
+      }
       break;
     case 'camera':
       settings.camera = rig.toggle();
@@ -633,8 +722,19 @@ const settingsPanel = new SettingsPanel(ui, {
     },
     bots: (on) => flash(on ? 'BOTS ON — NEXT MAP LOAD' : 'BOTS OFF — NEXT MAP LOAD'),
     botDifficulty: (d) => flash(`BOT DIFFICULTY: ${d.toUpperCase()} — NEXT MAP LOAD`),
-    volume: (v) => sfx.setVolume(v),
+    volume: (v) => {
+      sfx.setVolume(v);
+      engine.setVolume(v);
+    },
     killcam: (on) => flash(on ? 'KILLCAM ON' : 'KILLCAM OFF', 700),
+    weather: (w) => {
+      if (!bspName) {
+        flash('WEATHER APPLIES ON BSP MAPS', 1200);
+        return;
+      }
+      applyWeather(w);
+      flash(WEATHERS[w].label.toUpperCase(), 900);
+    },
   },
   save: () => saveSettings(settings),
   rates: {
@@ -784,7 +884,10 @@ const _aimQ = new THREE.Quaternion();
 const _uptiltQ = new THREE.Quaternion();
 const _aimX = new THREE.Vector3(1, 0, 0);
 const _kcEye = new THREE.Vector3(); // killcam killer-eye anchor
+const _decalDir = new THREE.Vector3();
+const _decalEnd = new THREE.Vector3();
 let whirrAcc = 0; // sim seconds since the last enemy-drone whirr ping
+let ambienceOn = false;
 
 const hooks = {
   simTick(dt: number) {
@@ -834,11 +937,21 @@ const hooks = {
         if (currentWeapon === 'burst') sfx.burst();
         else sfx.shoot();
       }
-      if (shot.hitWorld) fx.impact(shot.to);
+      if (shot.hitWorld) {
+        fx.impact(shot.to);
+        // bullet mark: re-sweep a hair past the impact to recover the surface normal
+        if (collisionWorld?.sweep) {
+          _decalDir.subVectors(shot.to, shot.from).normalize();
+          _decalEnd.copy(shot.to).addScaledVector(_decalDir, 0.2);
+          const dh = collisionWorld.sweep(shot.from, _decalEnd);
+          if (dh) decals.add(dh.point, dh.normal);
+        }
+      }
       if (shot.targetIndex !== null) targetRegistry.dispatchHit(shot.targetIndex, shot.damage);
       bots?.suppressNear(shot.from, shot.to); // near misses rattle soldiers' aim
     }
     barrels?.tick(dt);
+    for (const g of grenades.tick(dt, collisionWorld)) onGrenadeBlast(g.pos);
     if (pickups) {
       for (const ev of pickups.tick(dt, quad.pos, !quad.crashed)) {
         switchWeapon(ev.weapon);
@@ -871,6 +984,7 @@ const hooks = {
           recorder.logEvent('bot-died', [ev.pos.x, ev.pos.y, ev.pos.z]);
           fx.explosion(ev.pos);
           sfx.explode();
+          spawnCorpse(ev);
           flash(`${ev.kind === 'drone' ? 'DRONE' : 'SOLDIER'} DOWN`, 900);
           continue;
         }
@@ -878,7 +992,9 @@ const hooks = {
         recorder.logEvent('bot-shot', [ev.from.x, ev.from.y, ev.from.z, ev.to.x, ev.to.y, ev.to.z, ev.hitPlayer ? 1 : 0]);
         fx.tracer(ev.from, ev.to);
         fx.muzzle(ev.from);
-        sfx.botShoot();
+        // gunfire behind geometry reaches the ear muffled
+        if (collisionWorld?.sweep && collisionWorld.sweep(quad.pos, ev.from)) sfx.botShootOccluded();
+        else sfx.botShoot();
         if (ev.hitPlayer && !quad.crashed) {
           // bearing of the shooter relative to the camera yaw → edge chevron
           _hitEuler.setFromQuaternion(quad.q, 'YXZ');
@@ -929,6 +1045,11 @@ const hooks = {
 
       rig.update(frameDt);
       fx.update(frameDt);
+      ragdolls.update(frameDt, ragdollFloor);
+      // engine hum + wind follow arm state, throttle and airspeed
+      if (quad.armed && !quad.crashed && !engine.running) engine.start();
+      else if ((!quad.armed || quad.crashed) && engine.running) engine.stop();
+      engine.update(lastThrottle, quad.vel.length());
       bots?.updateVisuals(frameDt, renderPos);
     }
 

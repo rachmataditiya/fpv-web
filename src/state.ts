@@ -1,4 +1,6 @@
 /** App settings — persisted to localStorage 'fpv_settings' on every change. */
+import type { WeatherId } from './game/weatherTable';
+
 export type Quality = 'low' | 'med' | 'high';
 export type CameraMode = 'fpv' | 'chase';
 export type BotDifficulty = 'easy' | 'normal' | 'hard';
@@ -19,6 +21,10 @@ export interface Settings {
   volume: number;
   /** Killer-POV replay on death (war mode). */
   killcam: boolean;
+  /** Weather/time-of-day on BSP maps — gameplay-coupled (bot senses scale). */
+  weather: WeatherId;
+  /** Player drone accent color (garage). */
+  accent: number;
   bestLapMsByTrack: Record<string, number>;
 }
 
@@ -34,6 +40,8 @@ export const DEFAULT_SETTINGS: Settings = {
   botDifficulty: 'normal',
   volume: 0.5, // matches the Sfx master-gain default users have been hearing
   killcam: true,
+  weather: 'clear_day',
+  accent: 0xff8800,
   bestLapMsByTrack: {},
 };
 

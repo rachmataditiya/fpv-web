@@ -7,7 +7,7 @@ export class KeyboardSource implements InputSource {
   private readonly result: NormalizedInput = {
     id: 'keyboard',
     axes: [0, 0, 0, 0],
-    buttons: new Array<boolean>(10).fill(false),
+    buttons: new Array<boolean>(11).fill(false),
   };
 
   // Convenience references
@@ -39,7 +39,7 @@ export class KeyboardSource implements InputSource {
     'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown',
     'KeyA', 'KeyD', 'KeyW', 'KeyS',
     'Enter', 'KeyR', 'KeyV', 'Escape', 'Space', 'Backspace',
-    'Digit1', 'Digit2', 'Digit3', 'KeyQ',
+    'Digit1', 'Digit2', 'Digit3', 'KeyQ', 'KeyF',
   ]);
 
   constructor() {
@@ -89,6 +89,7 @@ export class KeyboardSource implements InputSource {
     this.buttons[7] = this.held.has('Digit2');    // weapon 2 (burst)
     this.buttons[8] = this.held.has('Digit3');    // weapon 3 (railgun)
     this.buttons[9] = this.held.has('KeyQ');      // next weapon
+    this.buttons[10] = this.held.has('KeyF');     // grenade drop
   }
 
   /**
