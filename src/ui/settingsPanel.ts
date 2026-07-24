@@ -33,12 +33,68 @@ export interface SettingsDeps {
   restartRace(): void;
 }
 
+type TabId = 'flight' | 'war' | 'audio' | 'rates' | 'keys';
+
+const TABS: { id: TabId; label: string }[] = [
+  { id: 'flight', label: 'Flight & View' },
+  { id: 'war', label: 'War Mode' },
+  { id: 'audio', label: 'Audio' },
+  { id: 'rates', label: 'Rates' },
+  { id: 'keys', label: 'Shortcuts' },
+];
+
+/** Keyboard/controller reference rendered on the Shortcuts tab. */
+const SHORTCUT_GROUPS: { title: string; rows: [string, string][] }[] = [
+  {
+    title: 'Flight',
+    rows: [
+      ['↑ ↓ ← →', 'Pitch / Roll'],
+      ['A / D', 'Yaw'],
+      ['W / S', 'Throttle'],
+      ['Enter', 'Arm / Disarm'],
+      ['R', 'Respawn at checkpoint'],
+      ['Shift + R', 'Restart race'],
+      ['V', 'Camera FPV / chase'],
+      ['Esc', 'Pause'],
+    ],
+  },
+  {
+    title: 'Combat',
+    rows: [
+      ['Space (hold)', 'Fire — auto-fire / charge railgun'],
+      ['1 / 2 / 3', 'Blaster / Burst / Railgun'],
+      ['Q', 'Next weapon'],
+      ['Space or R', 'Skip killcam'],
+    ],
+  },
+  {
+    title: 'Panels & track editor',
+    rows: [
+      ['C', 'Controller & calibration'],
+      ['T', 'Track editor on/off (BSP maps)'],
+      ['G', 'Place gate at drone'],
+      ['U', 'Undo last gate'],
+      ['Backspace', 'Restart race'],
+    ],
+  },
+  {
+    title: 'Gamepad / DJI RC 3',
+    rows: [
+      ['Mode 2 sticks', 'Left = yaw+throttle · right = pitch+roll'],
+      ['RB / RT', 'Next weapon / Fire (gamepad)'],
+      ['Left-center switch', 'Next weapon (DJI RC)'],
+      ['Controller panel', 'Full mapping & calibration wizard'],
+    ],
+  },
+];
+
 export class SettingsPanel {
   private readonly root: HTMLElement;
   private readonly deps: SettingsDeps;
   private overlayEl: HTMLDivElement | null = null;
   private keydownHandler: ((e: KeyboardEvent) => void) | null = null;
   private _open = false;
+  private activeTab: TabId = 'flight';
 
   private static styleInjected = false;
 
@@ -78,96 +134,111 @@ export class SettingsPanel {
     return this._open;
   }
 
+  private showTab(id: TabId): void {
+    this.activeTab = id;
+    if (!this.overlayEl) return;
+    this.overlayEl.querySelectorAll<HTMLButtonElement>('.tab-btn').forEach((b) => {
+      b.classList.toggle('active', b.dataset.tab === id);
+    });
+    this.overlayEl.querySelectorAll<HTMLDivElement>('.tab-page').forEach((p) => {
+      p.style.display = p.dataset.tab === id ? 'block' : 'none';
+    });
+  }
+
   private syncControls(): void {
     if (!this.overlayEl) return;
     const s = this.deps.settings;
     // Quality buttons
-    const buttons = this.overlayEl.querySelectorAll<HTMLButtonElement>('.quality-btn');
-    buttons.forEach(btn => {
-      const q = btn.dataset.quality;
-      if (q === s.quality) {
-        btn.classList.add('active');
-      } else {
-        btn.classList.remove('active');
-      }
+    this.overlayEl.querySelectorAll<HTMLButtonElement>('.quality-btn:not(.difficulty-btn)').forEach(btn => {
+      btn.classList.toggle('active', btn.dataset.quality === s.quality);
     });
-    // Uptilt
-    const uptiltInput = this.overlayEl.querySelector<HTMLInputElement>('.uptilt-slider');
-    const uptiltLabel = this.overlayEl.querySelector<HTMLSpanElement>('.uptilt-value');
-    if (uptiltInput) uptiltInput.value = String(s.uptiltDeg);
-    if (uptiltLabel) uptiltLabel.textContent = `${s.uptiltDeg}°`;
-    // FOV
-    const fovInput = this.overlayEl.querySelector<HTMLInputElement>('.fov-slider');
-    const fovLabel = this.overlayEl.querySelector<HTMLSpanElement>('.fov-value');
-    if (fovInput) fovInput.value = String(s.fovDeg);
-    if (fovLabel) fovLabel.textContent = `${s.fovDeg}°`;
-    // Chase stiffness
-    const chaseInput = this.overlayEl.querySelector<HTMLInputElement>('.chase-slider');
-    const chaseLabel = this.overlayEl.querySelector<HTMLSpanElement>('.chase-value');
-    if (chaseInput) chaseInput.value = String(s.chaseStiffness);
-    if (chaseLabel) chaseLabel.textContent = s.chaseStiffness.toFixed(1);
-    // Free-fly
-    const freeFlyCheck = this.overlayEl.querySelector<HTMLInputElement>('.freefly-check');
-    if (freeFlyCheck) freeFlyCheck.checked = s.freeFly;
-    // War mode
-    const botsCheck = this.overlayEl.querySelector<HTMLInputElement>('.bots-check');
-    if (botsCheck) botsCheck.checked = s.bots;
+    // Sliders + labels
+    const setVal = (cls: string, value: string, label: string) => {
+      const input = this.overlayEl!.querySelector<HTMLInputElement>(`.${cls}-slider`);
+      const lab = this.overlayEl!.querySelector<HTMLSpanElement>(`.${cls}-value`);
+      if (input) input.value = value;
+      if (lab) lab.textContent = label;
+    };
+    setVal('uptilt', String(s.uptiltDeg), `${s.uptiltDeg}°`);
+    setVal('fov', String(s.fovDeg), `${s.fovDeg}°`);
+    setVal('chase', String(s.chaseStiffness), s.chaseStiffness.toFixed(1));
+    setVal('volume', String(Math.round(s.volume * 100)), `${Math.round(s.volume * 100)}%`);
+    // Checkboxes
+    const check = (cls: string, on: boolean) => {
+      const el = this.overlayEl!.querySelector<HTMLInputElement>(`.${cls}`);
+      if (el) el.checked = on;
+    };
+    check('freefly-check', s.freeFly);
+    check('bots-check', s.bots);
+    check('killcam-check', s.killcam);
     this.overlayEl.querySelectorAll<HTMLButtonElement>('.difficulty-btn').forEach(btn => {
       btn.classList.toggle('active', btn.dataset.difficulty === s.botDifficulty);
     });
-    const killcamCheck = this.overlayEl.querySelector<HTMLInputElement>('.killcam-check');
-    if (killcamCheck) killcamCheck.checked = s.killcam;
-    // Audio
-    const volInput = this.overlayEl.querySelector<HTMLInputElement>('.volume-slider');
-    const volLabel = this.overlayEl.querySelector<HTMLSpanElement>('.volume-value');
-    if (volInput) volInput.value = String(Math.round(s.volume * 100));
-    if (volLabel) volLabel.textContent = `${Math.round(s.volume * 100)}%`;
 
     // Rates & throttle (active device profile)
     const active = this.deps.rates?.get() ?? null;
     const devEl = this.overlayEl.querySelector<HTMLSpanElement>('.rates-device');
     if (devEl) devEl.textContent = active ? active.deviceId.slice(0, 34) : 'no device';
-    const setSlider = (cls: string, value: number, label: string) => {
-      const input = this.overlayEl!.querySelector<HTMLInputElement>(`.${cls}-slider`);
-      const lab = this.overlayEl!.querySelector<HTMLSpanElement>(`.${cls}-value`);
-      if (input) input.value = String(value);
-      if (lab) lab.textContent = label;
-    };
     if (active) {
       const a = active.profile.axes;
-      setSlider('rr', a.roll.rate ?? 400, `${a.roll.rate ?? 400}°/s`);
-      setSlider('pr', a.pitch.rate ?? 400, `${a.pitch.rate ?? 400}°/s`);
-      setSlider('yr', a.yaw.rate ?? 400, `${a.yaw.rate ?? 400}°/s`);
-      setSlider('rpx', a.roll.expo, a.roll.expo.toFixed(2));
-      setSlider('yx', a.yaw.expo, a.yaw.expo.toFixed(2));
-      setSlider('tx', a.throttle.expo, a.throttle.expo.toFixed(2));
+      setVal('rr', String(a.roll.rate ?? 400), `${a.roll.rate ?? 400}°/s`);
+      setVal('pr', String(a.pitch.rate ?? 400), `${a.pitch.rate ?? 400}°/s`);
+      setVal('yr', String(a.yaw.rate ?? 400), `${a.yaw.rate ?? 400}°/s`);
+      setVal('rpx', String(a.roll.expo), a.roll.expo.toFixed(2));
+      setVal('yx', String(a.yaw.expo), a.yaw.expo.toFixed(2));
+      setVal('tx', String(a.throttle.expo), a.throttle.expo.toFixed(2));
       const lim = Math.round((a.throttle.limit ?? 1) * 100);
-      setSlider('tl', lim, `${lim}%`);
+      setVal('tl', String(lim), `${lim}%`);
     }
+    this.showTab(this.activeTab);
   }
 
   private _createDOM(): void {
     const overlay = document.createElement('div');
     overlay.className = 'settings-overlay';
     overlay.style.display = 'none';
-
-    // Backdrop click → close
     overlay.addEventListener('click', (e) => {
       if (e.target === overlay) this.close();
     });
 
-    // Panel
     const panel = document.createElement('div');
     panel.className = 'settings-panel';
     panel.addEventListener('click', (e) => e.stopPropagation());
 
-    // Title
     const title = document.createElement('h2');
     title.className = 'settings-title';
     title.textContent = 'Settings';
     panel.appendChild(title);
 
-    // Quality row
+    // ---- tab bar ----
+    const tabBar = document.createElement('div');
+    tabBar.className = 'tab-bar';
+    for (const t of TABS) {
+      const btn = document.createElement('button');
+      btn.className = 'tab-btn';
+      btn.dataset.tab = t.id;
+      btn.textContent = t.label;
+      btn.addEventListener('click', () => this.showTab(t.id));
+      tabBar.appendChild(btn);
+    }
+    panel.appendChild(tabBar);
+
+    const pages: Record<TabId, HTMLDivElement> = {} as Record<TabId, HTMLDivElement>;
+    for (const t of TABS) {
+      const page = document.createElement('div');
+      page.className = 'tab-page';
+      page.dataset.tab = t.id;
+      page.style.display = 'none';
+      panel.appendChild(page);
+      pages[t.id] = page;
+    }
+
+    // ================= FLIGHT & VIEW =================
+    const flight = pages.flight;
+    const qualityLabel = document.createElement('label');
+    qualityLabel.className = 'slider-label';
+    qualityLabel.textContent = 'Render quality';
+    flight.appendChild(qualityLabel);
     const qualityContainer = document.createElement('div');
     qualityContainer.className = 'quality-buttons';
     (['low', 'med', 'high'] as Quality[]).forEach(q => {
@@ -183,80 +254,35 @@ export class SettingsPanel {
       });
       qualityContainer.appendChild(btn);
     });
-    panel.appendChild(qualityContainer);
+    flight.appendChild(qualityContainer);
 
-    // Uptilt slider
-    const uptiltGroup = this._makeSliderGroup('FPV camera uptilt', '0', '40', '1', '°',
-      (value) => {
-        this.deps.settings.uptiltDeg = value;
-        this.deps.apply.uptilt(value);
-      }
-    );
-    uptiltGroup.querySelector('.slider-input')!.classList.add('uptilt-slider');
-    uptiltGroup.querySelector('.live-label')!.classList.add('uptilt-value');
-    panel.appendChild(uptiltGroup);
-
-    // FOV slider
-    const fovGroup = this._makeSliderGroup('FPV FOV', '90', '140', '1', '°',
-      (value) => {
-        this.deps.settings.fovDeg = value;
-        this.deps.apply.fov(value);
-      }
-    );
-    fovGroup.querySelector('.slider-input')!.classList.add('fov-slider');
-    fovGroup.querySelector('.live-label')!.classList.add('fov-value');
-    panel.appendChild(fovGroup);
-
-    // Chase stiffness slider
-    const chaseGroup = this._makeSliderGroup('Chase smoothness', '8', '20', '0.1', '',
-      (value) => {
-        this.deps.settings.chaseStiffness = value;
-        this.deps.apply.chaseStiffness(value);
-      }
-    );
-    chaseGroup.querySelector('.slider-input')!.classList.add('chase-slider');
-    chaseGroup.querySelector('.live-label')!.classList.add('chase-value');
-    panel.appendChild(chaseGroup);
-
-    // Free‑fly checkbox
-    const checkboxGroup = document.createElement('div');
-    checkboxGroup.className = 'checkbox-group';
-    const freeFlyInput = document.createElement('input');
-    freeFlyInput.type = 'checkbox';
-    freeFlyInput.className = 'freefly-check';
-    freeFlyInput.addEventListener('change', () => {
-      const checked = freeFlyInput.checked;
-      this.deps.settings.freeFly = checked;
-      this.deps.apply.freeFly(checked);
-      this.deps.save();
+    this._appendSlider(flight, 'uptilt', 'FPV camera uptilt', '0', '40', '1', '°', (v) => {
+      this.deps.settings.uptiltDeg = v;
+      this.deps.apply.uptilt(v);
     });
-    const freeFlyLabel = document.createElement('label');
-    freeFlyLabel.textContent = 'Free‑fly mode';
-    freeFlyLabel.prepend(freeFlyInput);
-    checkboxGroup.appendChild(freeFlyLabel);
-    panel.appendChild(checkboxGroup);
-
-    // ---- War mode: bots on/off + difficulty (apply on next map load) ----
-    const botsGroup = document.createElement('div');
-    botsGroup.className = 'checkbox-group';
-    const botsInput = document.createElement('input');
-    botsInput.type = 'checkbox';
-    botsInput.className = 'bots-check';
-    botsInput.addEventListener('change', () => {
-      this.deps.settings.bots = botsInput.checked;
-      this.deps.apply.bots(botsInput.checked);
-      this.deps.save();
+    this._appendSlider(flight, 'fov', 'FPV FOV', '90', '140', '1', '°', (v) => {
+      this.deps.settings.fovDeg = v;
+      this.deps.apply.fov(v);
     });
-    const botsLabel = document.createElement('label');
-    botsLabel.textContent = 'Enemy bots (next map load)';
-    botsLabel.prepend(botsInput);
-    botsGroup.appendChild(botsLabel);
-    panel.appendChild(botsGroup);
+    this._appendSlider(flight, 'chase', 'Chase smoothness', '8', '20', '0.1', '', (v) => {
+      this.deps.settings.chaseStiffness = v;
+      this.deps.apply.chaseStiffness(v);
+    });
+    this._appendCheckbox(flight, 'freefly-check', 'Free-fly mode', (on) => {
+      this.deps.settings.freeFly = on;
+      this.deps.apply.freeFly(on);
+    });
 
+    // ================= WAR MODE =================
+    const war = pages.war;
+    this._appendCheckbox(war, 'bots-check', 'Enemy bots (next map load)', (on) => {
+      this.deps.settings.bots = on;
+      this.deps.apply.bots(on);
+    });
     const diffLabel = document.createElement('label');
     diffLabel.className = 'slider-label';
     diffLabel.textContent = 'Bot difficulty (next map load)';
-    panel.appendChild(diffLabel);
+    war.appendChild(diffLabel);
     const diffContainer = document.createElement('div');
     diffContainer.className = 'quality-buttons';
     (['easy', 'normal', 'hard'] as BotDifficulty[]).forEach(d => {
@@ -272,66 +298,40 @@ export class SettingsPanel {
       });
       diffContainer.appendChild(btn);
     });
-    panel.appendChild(diffContainer);
-
-    // Killcam checkbox (war mode)
-    const killcamGroup = document.createElement('div');
-    killcamGroup.className = 'checkbox-group';
-    const killcamInput = document.createElement('input');
-    killcamInput.type = 'checkbox';
-    killcamInput.className = 'killcam-check';
-    killcamInput.addEventListener('change', () => {
-      this.deps.settings.killcam = killcamInput.checked;
-      this.deps.apply.killcam(killcamInput.checked);
-      this.deps.save();
+    war.appendChild(diffContainer);
+    this._appendCheckbox(war, 'killcam-check', 'Killcam on death', (on) => {
+      this.deps.settings.killcam = on;
+      this.deps.apply.killcam(on);
     });
-    const killcamLabel = document.createElement('label');
-    killcamLabel.textContent = 'Killcam on death';
-    killcamLabel.prepend(killcamInput);
-    killcamGroup.appendChild(killcamLabel);
-    panel.appendChild(killcamGroup);
 
-    // Master volume slider (live)
-    const volGroup = this._makeSliderGroup('Volume', '0', '100', '1', '%',
-      (value) => {
-        this.deps.settings.volume = value / 100;
-        this.deps.apply.volume(value / 100);
-      }
-    );
-    volGroup.querySelector('.slider-input')!.classList.add('volume-slider');
-    volGroup.querySelector('.live-label')!.classList.add('volume-value');
-    panel.appendChild(volGroup);
+    // ================= AUDIO =================
+    this._appendSlider(pages.audio, 'volume', 'Master volume', '0', '100', '1', '%', (v) => {
+      this.deps.settings.volume = v / 100;
+      this.deps.apply.volume(v / 100);
+    });
 
-    // ---- Rates & throttle (edits the active device's profile — same data the
-    // controller panel edits, so both stay in sync) ----
+    // ================= RATES =================
+    const rates = pages.rates;
     const ratesHead = document.createElement('div');
     ratesHead.className = 'settings-title';
-    ratesHead.style.cssText = 'margin-top:14px;display:flex;justify-content:space-between;align-items:baseline';
+    ratesHead.style.cssText = 'display:flex;justify-content:space-between;align-items:baseline;margin-bottom:14px';
     ratesHead.innerHTML = 'Rates & throttle <span class="rates-device" style="font:600 10px var(--mono);color:var(--mut);letter-spacing:0;text-transform:none"></span>';
-    panel.appendChild(ratesHead);
+    rates.appendChild(ratesHead);
 
     const prof = () => this.deps.rates?.get()?.profile ?? null;
     const persist = () => this.deps.rates?.persist();
     const rateSlider = (
-      cls: string,
-      label: string,
-      min: string,
-      max: string,
-      step: string,
-      set: (p: Profile, v: number) => void,
-      fmt: (v: number) => string,
+      cls: string, label: string, min: string, max: string, step: string,
+      set: (p: Profile, v: number) => void, fmt: (v: number) => string,
     ) => {
-      const g = this._makeSliderGroup(label, min, max, step, '', (value) => {
+      this._appendSlider(rates, cls, label, min, max, step, '', (v) => {
         const p = prof();
         if (!p) return;
-        set(p, value);
+        set(p, v);
         persist();
-        const lab = g.querySelector<HTMLSpanElement>('.live-label');
-        if (lab) lab.textContent = fmt(value);
+        const lab = this.overlayEl?.querySelector<HTMLSpanElement>(`.${cls}-value`);
+        if (lab) lab.textContent = fmt(v);
       });
-      g.querySelector('.slider-input')!.classList.add(`${cls}-slider`);
-      g.querySelector('.live-label')!.classList.add(`${cls}-value`);
-      panel.appendChild(g);
     };
     const degs = (v: number) => `${Math.round(v)}°/s`;
     rateSlider('rr', 'Roll rate', '120', '1200', '10', (p, v) => (p.axes.roll.rate = v), degs);
@@ -345,7 +345,29 @@ export class SettingsPanel {
     rateSlider('tx', 'Throttle expo', '0', '1', '0.05', (p, v) => (p.axes.throttle.expo = v), (v) => v.toFixed(2));
     rateSlider('tl', 'Throttle limit', '50', '100', '1', (p, v) => (p.axes.throttle.limit = v / 100), (v) => `${Math.round(v)}%`);
 
-    // Action buttons
+    // ================= SHORTCUTS =================
+    const keys = pages.keys;
+    for (const group of SHORTCUT_GROUPS) {
+      const h = document.createElement('div');
+      h.className = 'keys-head';
+      h.textContent = group.title;
+      keys.appendChild(h);
+      const table = document.createElement('div');
+      table.className = 'keys-table';
+      for (const [combo, what] of group.rows) {
+        const k = document.createElement('span');
+        k.className = 'keys-combo';
+        k.textContent = combo;
+        const w = document.createElement('span');
+        w.className = 'keys-what';
+        w.textContent = what;
+        table.appendChild(k);
+        table.appendChild(w);
+      }
+      keys.appendChild(table);
+    }
+
+    // ---- footer actions (visible on every tab) ----
     const actionContainer = document.createElement('div');
     actionContainer.className = 'action-buttons';
 
@@ -390,16 +412,36 @@ export class SettingsPanel {
     overlay.appendChild(panel);
     this.root.appendChild(overlay);
     this.overlayEl = overlay;
+    this.showTab('flight');
   }
 
-  private _makeSliderGroup(
+  private _appendCheckbox(parent: HTMLElement, cls: string, label: string, onChange: (on: boolean) => void): void {
+    const group = document.createElement('div');
+    group.className = 'checkbox-group';
+    const input = document.createElement('input');
+    input.type = 'checkbox';
+    input.className = cls;
+    input.addEventListener('change', () => {
+      onChange(input.checked);
+      this.deps.save();
+    });
+    const lab = document.createElement('label');
+    lab.textContent = label;
+    lab.prepend(input);
+    group.appendChild(lab);
+    parent.appendChild(group);
+  }
+
+  private _appendSlider(
+    parent: HTMLElement,
+    cls: string,
     labelText: string,
     min: string,
     max: string,
     step: string,
     suffix: string,
-    onChange: (value: number) => void
-  ): HTMLElement {
+    onChange: (value: number) => void,
+  ): void {
     const group = document.createElement('div');
     group.className = 'slider-group';
 
@@ -415,9 +457,9 @@ export class SettingsPanel {
     input.min = min;
     input.max = max;
     input.step = step;
-    input.className = 'slider-input';
+    input.className = `slider-input ${cls}-slider`;
     const liveValue = document.createElement('span');
-    liveValue.className = 'live-label';
+    liveValue.className = `live-label ${cls}-value`;
 
     input.addEventListener('input', () => {
       const value = parseFloat(input.value);
@@ -432,7 +474,7 @@ export class SettingsPanel {
     row.appendChild(liveValue);
     group.appendChild(label);
     group.appendChild(row);
-    return group;
+    parent.appendChild(group);
   }
 
   private _injectStyles(): void {
@@ -442,10 +484,7 @@ export class SettingsPanel {
     style.textContent = `
       .settings-overlay {
         position: fixed;
-        top: 0;
-        left: 0;
-        right: 0;
-        bottom: 0;
+        inset: 0;
         background: rgba(5, 7, 12, 0.72);
         backdrop-filter: blur(8px);
         display: flex;
@@ -457,22 +496,83 @@ export class SettingsPanel {
         background: var(--panel);
         border: 1px solid var(--line2);
         border-radius: 12px;
-        width: 420px;
+        width: 460px;
         padding: 24px;
         color: var(--fg);
         font-family: sans-serif;
         box-sizing: border-box;
-        max-height: 90vh;
+        max-height: 88vh;
         overflow-y: auto;
         box-shadow: 0 24px 80px rgba(0, 0, 0, 0.55);
         backdrop-filter: blur(6px);
       }
       .settings-title {
-        margin: 0 0 20px 0;
+        margin: 0 0 14px 0;
         font-size: 10px;
         font-weight: 700;
         letter-spacing: 0.16em;
         text-transform: uppercase;
+        color: var(--mut);
+      }
+      .tab-bar {
+        display: flex;
+        gap: 0;
+        margin-bottom: 20px;
+        border: 1px solid var(--line2);
+        border-radius: 8px;
+        overflow: hidden;
+      }
+      .tab-btn {
+        flex: 1;
+        padding: 8px 2px;
+        background: #10151f;
+        border: none;
+        border-right: 1px solid var(--line2);
+        color: var(--mut);
+        cursor: pointer;
+        font-size: 9px;
+        font-weight: 700;
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+        transition: background 0.15s, color 0.15s;
+      }
+      .tab-btn:last-child { border-right: none; }
+      .tab-btn:hover { color: var(--fg); }
+      .tab-btn.active {
+        background: var(--amber);
+        color: #1a1204;
+        font-weight: 800;
+      }
+      .tab-page { min-height: 220px; }
+      .keys-head {
+        font-size: 9px;
+        font-weight: 800;
+        letter-spacing: 0.18em;
+        text-transform: uppercase;
+        color: var(--amber);
+        margin: 14px 0 8px;
+      }
+      .keys-head:first-child { margin-top: 0; }
+      .keys-table {
+        display: grid;
+        grid-template-columns: 120px 1fr;
+        gap: 5px 14px;
+        align-items: baseline;
+      }
+      .keys-combo {
+        font-family: var(--mono);
+        font-size: 11px;
+        font-weight: 700;
+        color: var(--fg);
+        background: #10151f;
+        border: 1px solid var(--line2);
+        border-radius: 5px;
+        padding: 2px 7px;
+        text-align: center;
+        white-space: nowrap;
+      }
+      .keys-what {
+        font-size: 11px;
         color: var(--mut);
       }
       .quality-buttons {
@@ -492,13 +592,9 @@ export class SettingsPanel {
         font-weight: 600;
         transition: border-color 0.15s, background 0.15s, color 0.15s;
       }
-      .quality-btn:first-child {
-        border-radius: 7px 0 0 7px;
-      }
-      .quality-btn:last-child {
-        border-radius: 0 7px 7px 0;
-      }
-      .quality-btn:hover { 
+      .quality-btn:first-child { border-radius: 7px 0 0 7px; }
+      .quality-btn:last-child { border-radius: 0 7px 7px 0; }
+      .quality-btn:hover {
         border-color: var(--amber);
         color: var(--fg);
       }
@@ -508,9 +604,7 @@ export class SettingsPanel {
         color: #1a1204;
         font-weight: 800;
       }
-      .slider-group {
-        margin-bottom: 20px;
-      }
+      .slider-group { margin-bottom: 20px; }
       .slider-label {
         display: block;
         margin-bottom: 8px;
@@ -562,15 +656,12 @@ export class SettingsPanel {
         color: var(--fg);
       }
       .checkbox-group {
-        margin-bottom: 24px;
+        margin-bottom: 20px;
         display: flex;
         align-items: center;
         gap: 8px;
       }
-      .checkbox-group input[type=checkbox] {
-        margin: 0;
-        cursor: pointer;
-      }
+      .checkbox-group input[type=checkbox] { margin: 0; cursor: pointer; }
       .checkbox-group label {
         font-size: 10px;
         font-weight: 700;
@@ -587,6 +678,8 @@ export class SettingsPanel {
         flex-direction: column;
         gap: 10px;
         margin-top: 20px;
+        border-top: 1px solid var(--line2);
+        padding-top: 16px;
       }
       .action-btn {
         width: 100%;
@@ -600,7 +693,7 @@ export class SettingsPanel {
         font-weight: 600;
         transition: border-color 0.15s, color 0.15s;
       }
-      .action-btn:hover { 
+      .action-btn:hover {
         border-color: var(--amber);
         color: var(--fg);
       }
@@ -608,7 +701,6 @@ export class SettingsPanel {
         outline: 2px solid var(--amber);
         outline-offset: 2px;
       }
-
     `;
     document.head.appendChild(style);
     SettingsPanel.styleInjected = true;
