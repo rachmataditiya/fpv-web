@@ -19,13 +19,13 @@ export interface StoredMapMeta {
 // ---------------------------------------------------------------------------
 let dbPromise: Promise<IDBDatabase> | null = null;
 
-function getDatabase(): Promise<IDBDatabase> {
-  if (dbPromise) {
-    return dbPromise;
-  }
+const STORES = ['maps', 'meta'] as const;
 
-  dbPromise = new Promise<IDBDatabase>((resolve, reject) => {
-    const request: IDBOpenDBRequest = indexedDB.open('fpv_maps', 1);
+/** Open at a specific version (or the current one when undefined), creating
+ *  any missing object stores whenever an upgrade fires. */
+function openAt(version?: number): Promise<IDBDatabase> {
+  return new Promise<IDBDatabase>((resolve, reject) => {
+    const request: IDBOpenDBRequest = indexedDB.open('fpv_maps', version);
 
     request.onerror = () => {
       console.error('IndexedDB open error', request.error);
@@ -40,12 +40,10 @@ function getDatabase(): Promise<IDBDatabase> {
 
     request.onupgradeneeded = (event: IDBVersionChangeEvent) => {
       const db: IDBDatabase = (event.target as IDBOpenDBRequest).result;
-
-      if (!db.objectStoreNames.contains('maps')) {
-        db.createObjectStore('maps', { keyPath: 'name' });
-      }
-      if (!db.objectStoreNames.contains('meta')) {
-        db.createObjectStore('meta', { keyPath: 'name' });
+      for (const name of STORES) {
+        if (!db.objectStoreNames.contains(name)) {
+          db.createObjectStore(name, { keyPath: 'name' });
+        }
       }
     };
 
@@ -62,6 +60,31 @@ function getDatabase(): Promise<IDBDatabase> {
 
       resolve(db);
     };
+  });
+}
+
+function getDatabase(): Promise<IDBDatabase> {
+  if (dbPromise) {
+    return dbPromise;
+  }
+
+  // Open at the CURRENT version first, then verify the schema. A database
+  // created without our stores (older deploy, devtools, a stray open() from
+  // debugging) reports success but throws NotFoundError on every transaction
+  // — self-heal by reopening one version up, which re-fires the upgrade
+  // handler and creates whatever is missing. No data is lost.
+  dbPromise = openAt().then((db) => {
+    const missing = STORES.some((s) => !db.objectStoreNames.contains(s));
+    if (!missing) return db;
+    const next = db.version + 1;
+    db.close();
+    console.warn(`fpv_maps: object stores missing — healing via upgrade to v${next}`);
+    return openAt(next);
+  });
+
+  // A failed open must not poison the singleton forever (e.g. blocked tab).
+  dbPromise.catch(() => {
+    dbPromise = null;
   });
 
   return dbPromise;
