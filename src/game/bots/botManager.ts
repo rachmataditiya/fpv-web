@@ -351,7 +351,7 @@ export class BotManager {
       // a ragdoll takes over the corpse — hide instantly, skip the crumple
       b.mesh.visible = false;
       this.deathAnims[i] = null;
-      return { type: 'bot-died', kind: b.kind, pos: b.pos };
+      return { type: 'bot-died', kind: b.kind, cls: b.botClass, pos: b.pos };
     }
     this.deathAnims[i] = {
       t: 0,
@@ -362,7 +362,7 @@ export class BotManager {
       spinZ: -(4 + Math.abs(b.yaw % 1.2)),
       smoked: 0,
     };
-    return { type: 'bot-died', kind: b.kind, pos: b.pos };
+    return { type: 'bot-died', kind: b.kind, cls: b.botClass, pos: b.pos };
   }
 
   /** Player shot segment (from→to) just resolved — soldiers it passed within

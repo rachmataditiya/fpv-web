@@ -30,6 +30,8 @@ export interface HudData {
   score: number | null;
   /** Player hit points (null = no bot combat on this map → combat HUD hidden). */
   hp: number | null;
+  /** Mission status line (null = no mission running). */
+  mission: string | null;
   /** Bots destroyed (null = no bots on this map). */
   kills: number | null;
   /** Active weapon label (null = no weapon context → chip hidden). */
@@ -65,6 +67,12 @@ const CSS = `
 .hud-strip .subrow{display:flex;gap:14px;font-size:10.5px;color:var(--mut)}
 .hud-strip .subrow b{color:var(--fg);font-weight:600}
 .hud-strip .subrow .bestv{color:var(--amber)}
+
+/* ---- mission status (under the strip) ---- */
+.hud-mission{position:absolute;top:96px;left:50%;transform:translateX(-50%);
+  display:none;padding:5px 14px;border-radius:7px;background:rgba(11,14,20,.55);
+  border:1px solid rgba(44,55,80,.55);font-size:10px;font-weight:800;
+  letter-spacing:.16em;text-transform:uppercase;color:var(--amber)}
 .hud-pips{display:flex;gap:5px;margin-top:1px}
 .hud-pips i{width:6px;height:6px;border-radius:2px;background:var(--line2);transition:background .15s}
 .hud-pips i.done{background:var(--green)}
@@ -193,6 +201,7 @@ export class Hud {
   private wpnMeterLblEl: HTMLSpanElement;
   private wpnFillEl: HTMLDivElement;
   private dmgEl: HTMLDivElement;
+  private missionEl: HTMLDivElement;
   private hitDirEl: HTMLDivElement;
 
   private prev = {
@@ -210,6 +219,7 @@ export class Hud {
     countdown: '' as string,
     message: null as string | null,
     score: null as number | null,
+    mission: null as string | null,
     hp: NaN as number | null,
     kills: NaN as number | null,
     weaponName: null as string | null,
@@ -254,6 +264,7 @@ export class Hud {
       </div>
       <div class="hud-horizon"><canvas width="220" height="220" data-r="horizon"></canvas></div>
       <div class="hud-dmg" data-r="dmg"></div>
+      <div class="hud-mission mono" data-r="mission"></div>
       <div class="hud-hitdir" data-r="hitdir"><i></i></div>
       <div class="hud-hp mono" data-r="hp">
         <div class="row"><span class="lbl">integrity</span><span class="n" data-r="hpn">100</span></div>
@@ -295,6 +306,7 @@ export class Hud {
     this.wpnMeterLblEl = $('wpnmeterlbl');
     this.wpnFillEl = $('wpnfill');
     this.dmgEl = $('dmg');
+    this.missionEl = $('mission');
     this.hitDirEl = $('hitdir');
     this.horizonCanvas = this.container.querySelector('[data-r="horizon"]') as HTMLCanvasElement;
     this.horizonCtx = this.horizonCanvas.getContext('2d')!;
@@ -383,6 +395,11 @@ export class Hud {
       this.killLblEl.style.display = show;
       this.killsNEl.style.display = show;
       if (d.kills !== null) this.killsNEl.textContent = String(d.kills);
+    }
+    if (p.mission !== d.mission) {
+      p.mission = d.mission;
+      this.missionEl.style.display = d.mission ? 'block' : 'none';
+      if (d.mission) this.missionEl.textContent = d.mission;
     }
     if (p.hp !== d.hp) {
       p.hp = d.hp;

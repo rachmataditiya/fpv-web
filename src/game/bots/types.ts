@@ -207,6 +207,8 @@ export interface BotCtx {
 export interface BotDiedEvent {
   type: 'bot-died';
   kind: BotKind;
+  /** Combat class of the fallen bot — career stats key off this. */
+  cls: BotClass;
   pos: THREE.Vector3;
 }
 

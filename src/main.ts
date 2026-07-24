@@ -17,7 +17,7 @@ import { Race } from './world/race';
 import { MAPS, customMapDef, resolveMapId } from './world/maps';
 import { parseBsp } from './world/bsp/bspParser';
 import { parseWad } from './world/bsp/wadParser';
-import { loadMap } from './world/bsp/mapStore';
+import { listMaps, loadMap } from './world/bsp/mapStore';
 import { saveProfile } from './input/profiles';
 import { Weapon } from './game/weapon';
 import type { WeaponId } from './game/weapon';
@@ -38,6 +38,14 @@ import type { WeatherId } from './game/weatherTable';
 import { RagdollPool } from './render/ragdoll';
 import { DecalPool } from './render/decals';
 import { GrenadePool, GRENADE_BLAST_RADIUS, GRENADE_BOT_DAMAGE, GRENADE_PLAYER_DAMAGE } from './game/grenades';
+import { MissionRunner } from './game/missions';
+import type { MissionDef, MissionCtx } from './game/missions';
+import { DUST2_MISSIONS } from './game/missionDefs';
+import { Career } from './game/career';
+import { CareerScreen } from './ui/careerScreen';
+import { MainMenu } from './ui/mainMenu';
+import { Garage } from './ui/garage';
+import type { SquadMember } from './game/bots/types';
 import type { BotDiedEvent } from './game/bots/types';
 import { buildTrack, deleteTrackFor, exportTrackJson, fetchServerTrack, savedTrackFor, saveTrackFor } from './world/bsp/bspTracks';
 import { listServerMaps } from './world/bsp/serverMaps';
@@ -83,7 +91,7 @@ const { renderer, scene, setQuality, resize } = createScene(mount);
 setQuality(settings.quality);
 
 // player quad keeps the friendly orange accent — red is the enemy read
-const droneVisual = createDroneMesh({ accent: 0xff8800 });
+const droneVisual = createDroneMesh({ accent: settings.accent });
 scene.add(droneVisual);
 let gates: GateVisuals | null = track ? createGates(track) : null;
 if (gates) scene.add(gates.group);
@@ -160,6 +168,57 @@ const ragdolls = new RagdollPool(scene);
 const decals = new DecalPool(scene);
 const grenades = new GrenadePool();
 scene.add(grenades.group);
+
+// ---------- career + mission state (wave 5+8) ----------
+const career = new Career();
+let mission: MissionRunner | null = null;
+let currentSquad: SquadMember[] = DEFAULT_SQUAD;
+let playerDiedThisTick = false;
+/** Hunt objectives: barrel positions pinned at mission start; a boom within
+ *  3m of a point marks it down. */
+let huntPoints: THREE.Vector3[] = [];
+const huntDown = new Set<number>();
+const matchStats = {
+  kills: 0, deaths: 0, shotsFired: 0, shotsHit: 0,
+  streak: 0, bestStreak: 0, detected: false,
+  killsByClass: {} as Record<string, number>,
+};
+function resetMatchStats(): void {
+  matchStats.kills = 0; matchStats.deaths = 0;
+  matchStats.shotsFired = 0; matchStats.shotsHit = 0;
+  matchStats.streak = 0; matchStats.bestStreak = 0;
+  matchStats.detected = false;
+  matchStats.killsByClass = {};
+}
+
+/** Replace the live bot manager with a fresh one built from currentSquad —
+ *  used at map load and between mission waves. The target registry reads the
+ *  module `bots` var, so it follows automatically. */
+function swapBots(): void {
+  if (!makeBots) return;
+  if (bots) {
+    scene.remove(bots.group);
+    bots.group.clear();
+  }
+  bots = makeBots();
+  bots.externalSoldierCorpses = true; // live deaths ragdoll; killcam bots keep the crumple
+  scene.add(bots.group);
+  applyWeather(settings.weather);
+}
+
+/** Wave squads grow by cycling through the class roster. */
+function waveSquad(size: number): SquadMember[] {
+  const roster: SquadMember[] = [
+    { kind: 'soldier', cls: 'rifleman' },
+    { kind: 'drone', cls: 'rifleman' },
+    { kind: 'soldier', cls: 'heavy' },
+    { kind: 'drone', cls: 'scout' },
+    { kind: 'soldier', cls: 'sniper' },
+  ];
+  const out: SquadMember[] = [];
+  for (let i = 0; i < size; i++) out.push(roster[i % roster.length]);
+  return out;
+}
 
 /** Grenade detonation: FX + bots + barrel chain + the pilot if they linger. */
 function onGrenadeBlast(pos: THREE.Vector3): void {
@@ -398,6 +457,9 @@ function killPlayer(killerIdx: number): void {
   quad.crashTimer = params.respawnDelay;
   quad.vel.set(0, 0, 0);
   quad.thrust = 0;
+  matchStats.deaths++;
+  matchStats.streak = 0;
+  playerDiedThisTick = true;
   flash('YOU DIED');
   recorder.logEvent('player-died', [quad.pos.x, quad.pos.y, quad.pos.z]);
   if (killerIdx >= 0 && settings.killcam) startKillcam(killerIdx);
@@ -406,6 +468,10 @@ function killPlayer(killerIdx: number): void {
 /** A barrel went boom at pos (player shot or blast chain reaction): FX, bot
  *  area damage, and the too-close player crash check. */
 function onBarrelBoom(pos: THREE.Vector3): void {
+  // hunt objectives are pinned barrels — a boom on one marks it destroyed
+  huntPoints.forEach((hp, i) => {
+    if (!huntDown.has(i) && hp.distanceTo(pos) < 3) huntDown.add(i);
+  });
   fx.explosion(pos);
   const boomDist = quad.pos.distanceTo(pos);
   if (boomDist > 30) sfx.explodeFar(Math.min(1, boomDist / 100));
@@ -508,7 +574,8 @@ if (bspName) {
       // enemy bots (war mode): the 5-bot squad (rifle/sniper/heavy soldiers +
       // scout/rifle drones), spawned on real floors
       if (settings.bots) {
-        // factory preserved for killcam playback bots (identical construction)
+        // factory preserved for killcam playback bots AND mission wave swaps —
+        // always builds the CURRENT squad shape
         const botDifficulty = settings.botDifficulty;
         makeBots = () =>
           new BotManager(
@@ -517,20 +584,26 @@ if (bspName) {
             spawnCheckpoint.pos,
             world.geometryFloorAt,
             bsp.spawns.slice(1), // the map's unused player spawns make natural bot posts
-            DEFAULT_SQUAD,
+            currentSquad,
             4242,
             { difficulty: botDifficulty, fx },
           );
-        const bm = makeBots();
-        bots = bm;
-        bm.externalSoldierCorpses = true; // live deaths ragdoll; killcam bots keep the crumple
-        scene.add(bm.group);
-        applyWeather(settings.weather);
+        swapBots(); // builds the initial squad from currentSquad
+        // target source reads the LIVE module var — mission waves replace the
+        // manager instance and the registry must follow it
         targetRegistry.register({
-          get targets() { return bm.targets; },
+          get targets() { return bots?.targets ?? []; },
           onHit: (i, damage) => {
+            const bm = bots;
+            if (!bm) return;
+            const cls = (bm.targets[i] as { botClass?: string }).botClass ?? 'rifleman';
             const died = bm.hit(i, damage);
             if (died) {
+              matchStats.kills++;
+              matchStats.streak++;
+              matchStats.bestStreak = Math.max(matchStats.bestStreak, matchStats.streak);
+              matchStats.killsByClass[cls] = (matchStats.killsByClass[cls] ?? 0) + 1;
+              matchStats.shotsHit++;
               recorder.logEvent('bot-died', [died.pos.x, died.pos.y, died.pos.z]);
               fx.explosion(died.pos);
               sfx.explode();
@@ -538,6 +611,7 @@ if (bspName) {
               hud.pulseKill();
               flash(`${died.kind === 'drone' ? 'DRONE' : 'SOLDIER'} DOWN — ${bm.kills}`, 900);
             } else {
+              matchStats.shotsHit++;
               fx.impact(bm.targets[i].pos);
             }
           },
@@ -610,6 +684,7 @@ input.onAction = (a) => {
       saveSettings(settings);
       break;
     case 'pause':
+      if (mainMenu.isOpen) break; // the menu owns Esc while it is up
       togglePause();
       break;
     case 'shoot':
@@ -763,6 +838,150 @@ const settingsPanel = new SettingsPanel(ui, {
   restartRace,
 });
 
+// ---------- career screen, garage, missions, main menu (waves 5/8/9) ----------
+const careerScreen = new CareerScreen(ui, career);
+const garage = new Garage(ui, {
+  getAccent: () => settings.accent,
+  setAccent: (hex) => {
+    settings.accent = hex;
+    saveSettings(settings);
+  },
+  getSkin: () => settings.skin,
+  setSkin: (id) => {
+    settings.skin = id;
+    saveSettings(settings);
+  },
+});
+
+function startMission(def: MissionDef): void {
+  if (!bots || !collisionWorld) {
+    flash('MISSIONS NEED A BSP MAP WITH BOTS', 1500);
+    return;
+  }
+  resetMatchStats();
+  huntDown.clear();
+  huntPoints = [];
+  if (def.type === 'hunt' && def.huntPoints && barrels) {
+    // pin one barrel per objective point, snapped to the real floor
+    const bt = barrels.targets;
+    def.huntPoints.forEach(([x, , z], i) => {
+      const floor = collisionWorld!.floorAt(x, 200, z);
+      const y = floor === null ? 1 : floor;
+      huntPoints.push(new THREE.Vector3(x, y + 1.35, z));
+      const b = bt[i] as { pos: THREE.Vector3; alive: boolean; mesh?: THREE.Group };
+      b.pos.set(x, y + 1.35, z);
+      b.alive = true;
+      const mesh = (bt[i] as unknown as { mesh: THREE.Group }).mesh;
+      mesh.position.set(x, y, z);
+      mesh.visible = true;
+    });
+  }
+  mission = new MissionRunner(def, {
+    spawnWave: (wave, size) => {
+      currentSquad = waveSquad(size);
+      swapBots();
+      flash(`WAVE ${wave} INBOUND — ${size} HOSTILES`, 1600);
+    },
+    isHuntTargetDown: (i) => huntDown.has(i),
+  }, spawnCheckpoint.pos);
+  mission.start();
+  respawn();
+  flash(def.name.toUpperCase(), 1500);
+}
+
+function finishMission(won: boolean): void {
+  if (!mission) return;
+  const sum = mission.summary();
+  const gains = career.addMatch({
+    missionId: sum.missionId,
+    won,
+    timeS: sum.timeS,
+    kills: matchStats.kills,
+    deaths: matchStats.deaths,
+    shotsFired: matchStats.shotsFired,
+    shotsHit: matchStats.shotsHit,
+    killsByClass: { ...matchStats.killsByClass },
+    detected: matchStats.detected,
+    bestStreak: matchStats.bestStreak,
+  });
+  mission = null;
+  currentSquad = DEFAULT_SQUAD;
+  swapBots();
+  const medals = gains.newMedals.length ? ` · MEDAL: ${gains.newMedals.map((m) => m.name).join(', ')}` : '';
+  flash(`${won ? 'MISSION COMPLETE' : 'MISSION FAILED'} — +${gains.xpGained} XP${medals}`, 3500);
+  setTimeout(() => careerScreen.open(), 1200);
+}
+
+/** Minimal WAR OPS picker — pit-wall list over the existing panel styles. */
+const missionPicker = document.createElement('div');
+missionPicker.className = 'settings-overlay';
+missionPicker.style.display = 'none';
+{
+  const p = document.createElement('div');
+  p.className = 'settings-panel';
+  p.innerHTML = '<h2 class="settings-title">War Ops — dust2</h2>';
+  for (const def of DUST2_MISSIONS) {
+    const btn = document.createElement('button');
+    btn.className = 'action-btn';
+    btn.style.textAlign = 'left';
+    btn.innerHTML = `<b style="color:var(--amber)">${def.name.toUpperCase()}</b><br><span style="font-size:11px;color:var(--mut)">${def.briefing}</span>`;
+    btn.style.marginBottom = '10px';
+    btn.addEventListener('click', () => {
+      missionPicker.style.display = 'none';
+      startMission(def);
+    });
+    p.appendChild(btn);
+  }
+  missionPicker.appendChild(p);
+  missionPicker.addEventListener('click', (e) => {
+    if (e.target === missionPicker) missionPicker.style.display = 'none';
+  });
+  ui.appendChild(missionPicker);
+}
+
+const mainMenu = new MainMenu(ui, {
+  listMaps: async () => {
+    const out: { id: string; label: string; kind: 'builtin' | 'custom' | 'server' }[] = [
+      { id: 'canyon', label: 'Canyon Circuit', kind: 'builtin' },
+      { id: 'valley', label: 'Valley Cinematic', kind: 'builtin' },
+    ];
+    try {
+      for (const m of await listMaps()) out.push({ id: `custom:${m.name}`, label: m.name, kind: 'custom' });
+    } catch { /* idb unavailable */ }
+    try {
+      for (const m of await listServerMaps()) out.push({ id: `server:${m.name}`, label: m.name, kind: 'server' });
+    } catch { /* offline */ }
+    return out;
+  },
+  play: (mapId) => flyTo(mapId),
+  resume: () => mainMenu.close(),
+  openMissions: () => {
+    if (!bspName || !settings.bots) {
+      flash('WAR OPS NEEDS A BSP MAP WITH BOTS ON', 1600);
+      return;
+    }
+    mainMenu.close();
+    missionPicker.style.display = 'flex';
+  },
+  openCareer: () => {
+    mainMenu.close();
+    careerScreen.open();
+  },
+  openSettings: () => {
+    mainMenu.close();
+    settingsPanel.open();
+  },
+  openController: () => {
+    mainMenu.close();
+    panel.open();
+  },
+  openGarage: () => {
+    mainMenu.close();
+    garage.open();
+  },
+  version: 'war-ops 1.0',
+});
+
 // ---------- BSP track editor: T toggle, G place gate at drone, U undo ----------
 function editorPreview(): void {
   gates?.group.removeFromParent();
@@ -873,6 +1092,7 @@ const hudData: HudData = {
   score: null,
   hp: null,
   kills: null,
+  mission: null,
   weaponName: null,
   weaponMeter: null,
   weaponMeterLabel: null,
@@ -886,6 +1106,20 @@ const _aimX = new THREE.Vector3(1, 0, 0);
 const _kcEye = new THREE.Vector3(); // killcam killer-eye anchor
 const _decalDir = new THREE.Vector3();
 const _decalEnd = new THREE.Vector3();
+// objective marker (missions): pulsing amber ring at the current goal
+const objectiveMarker = new THREE.Mesh(
+  new THREE.TorusGeometry(1.6, 0.09, 8, 28),
+  new THREE.MeshBasicMaterial({ color: 0xffb020, transparent: true, opacity: 0.85, depthWrite: false }),
+);
+objectiveMarker.visible = false;
+scene.add(objectiveMarker);
+const _missionCtx: MissionCtx = {
+  playerPos: new THREE.Vector3(),
+  playerAlive: true,
+  kills: 0,
+  botsAlive: 0,
+  playerDied: false,
+};
 let whirrAcc = 0; // sim seconds since the last enemy-drone whirr ping
 let ambienceOn = false;
 
@@ -927,6 +1161,7 @@ const hooks = {
     const shot = weapon.tick(dt, quad.pos, _aimQ, collisionWorld, targetRegistry.collect());
     if (chargeWas === 0 && weapon.charge01() > 0) sfx.chargeUp(); // charge-start edge
     if (shot) {
+      matchStats.shotsFired++;
       recorder.logEvent('shot', [shot.from.x, shot.from.y, shot.from.z, shot.to.x, shot.to.y, shot.to.z]);
       if (currentWeapon === 'railgun') {
         fx.tracerThick(shot.from, shot.to); // includes the bigger muzzle
@@ -952,6 +1187,33 @@ const hooks = {
     }
     barrels?.tick(dt);
     for (const g of grenades.tick(dt, collisionWorld)) onGrenadeBlast(g.pos);
+
+    // mission runner (wave 5) — driven purely by sim state
+    if (mission) {
+      if (bots && !matchStats.detected) {
+        // once any bot engages, the Ghost medal is gone
+        for (const b of bots.targets) {
+          if ((b as { state?: string }).state === 'engage') {
+            matchStats.detected = true;
+            break;
+          }
+        }
+      }
+      const mev = mission.tick(dt, {
+        playerPos: quad.pos,
+        playerAlive: !quad.crashed,
+        kills: matchStats.kills,
+        botsAlive: bots?.aliveCount() ?? 0,
+        playerDied: playerDiedThisTick,
+      });
+      for (const ev of mev) {
+        if (ev.type === 'flash') flash(ev.msg, ev.ms ?? 1400);
+        else if (ev.type === 'objective-done') flash(`OBJECTIVE DOWN — ${ev.remaining} LEFT`, 1400);
+        else if (ev.type === 'won') finishMission(true);
+        else if (ev.type === 'lost') finishMission(false);
+      }
+    }
+    playerDiedThisTick = false;
     if (pickups) {
       for (const ev of pickups.tick(dt, quad.pos, !quad.crashed)) {
         switchWeapon(ev.weapon);
@@ -1100,6 +1362,26 @@ const hooks = {
     hudData.mode = race && !settings.freeFly && !editingTrack ? 'race' : 'freefly';
     hudData.score = barrels ? barrels.score : null;
     hudData.hp = bots ? playerHealth.hp : null;
+    if (mission) {
+      _missionCtx.playerPos = renderPos;
+      _missionCtx.kills = matchStats.kills;
+      _missionCtx.botsAlive = bots?.aliveCount() ?? 0;
+      _missionCtx.playerAlive = !quad.crashed;
+      hudData.mission = mission.status(_missionCtx);
+      const obj = mission.objective();
+      if (obj) {
+        objectiveMarker.visible = true;
+        objectiveMarker.position.copy(obj);
+        objectiveMarker.rotation.y += frameDt * 1.2;
+        const s = 1 + Math.sin(performance.now() * 0.004) * 0.12;
+        objectiveMarker.scale.setScalar(s);
+      } else {
+        objectiveMarker.visible = false;
+      }
+    } else {
+      hudData.mission = null;
+      objectiveMarker.visible = false;
+    }
     hudData.kills = bots ? bots.kills : null;
     // weapon chip: heat on instant configs; charge while charging, else
     // cooldown recovery on the railgun
@@ -1123,6 +1405,7 @@ const hooks = {
 };
 
 const loop = startLoop(hooks);
+mainMenu.open(); // boot into the front-end; RESUME drops you into the sim
 
 gates?.setNext(0);
 

@@ -25,6 +25,8 @@ export interface Settings {
   weather: WeatherId;
   /** Player drone accent color (garage). */
   accent: number;
+  /** Player drone skin id (garage). */
+  skin: string;
   bestLapMsByTrack: Record<string, number>;
 }
 
@@ -42,6 +44,7 @@ export const DEFAULT_SETTINGS: Settings = {
   killcam: true,
   weather: 'clear_day',
   accent: 0xff8800,
+  skin: 'stealth',
   bestLapMsByTrack: {},
 };
 
